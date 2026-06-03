@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>haptiquad_nav</name>
+  <version>0.1.0</version>
+  <description>
+    HaptiQuad navigation stack — contact-based obstacle classification
+    using GRF/base wrench estimation with a dual-costmap architecture.
+  </description>
+
+  <maintainer email="michele.lisi@phd.unipi.it">Michele Lisi</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Core nav deps -->
+  <depend>move_base</depend>
+  <depend>nav_core</depend>
+  <depend>costmap_2d</depend>
+  <depend>navfn</depend>
+  <depend>base_local_planner</depend>
+  <depend>dwa_local_planner</depend>
+  <depend>rotate_recovery</depend>
+  <depend>clear_costmap_recovery</depend>
+  <depend>map_server</depend>
+
+  <!-- Message deps -->
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <!-- Pointcloud → laserscan bridge -->
+  <depend>pointcloud_to_laserscan</depend>
+
+  <!-- Python node deps -->
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+  </export>
+</package>

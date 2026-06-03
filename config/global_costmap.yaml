@@ -1,0 +1,20 @@
+# global_costmap.yaml
+# The planner's world: starts all free.
+# Obstacles are added here ONLY after contact_probe_manager
+# confirms them as solid (via /move_base/global_costmap/... update).
+
+global_frame: map
+update_frequency: 1.0           # Hz — low, we update on events not continuously
+publish_frequency: 1.0
+static_map: true                # starts from map_server (all-free map)
+rolling_window: false
+transform_tolerance: 1.5
+
+# ── Layers ───────────────────────────────────────────────────────
+# NO obstacle_layer here — the global planner sees a free world.
+# Confirmed-solid obstacles will be injected programmatically.
+plugins:
+  - name: static_layer
+    type: costmap_2d::StaticLayer
+  - name: inflation_layer
+    type: costmap_2d::InflationLayer

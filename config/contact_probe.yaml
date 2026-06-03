@@ -1,0 +1,35 @@
+# contact_probe.yaml
+# Parameters for the contact_probe_manager state machine node.
+
+# ── Wrench thresholds ─────────────────────────────────────────────
+# Forces in [N], torques in [Nm]
+# Contact is confirmed solid if ANY component exceeds its threshold.
+wrench_threshold:
+  fx: 15.0          # forward force — primary contact signal
+  fy: 10.0
+  fz: 30.0          # vertical — usually terrain, be conservative
+  tx: 3.0
+  ty: 3.0
+  tz: 2.0
+
+# Averaging window for wrench (reduces noise spikes)
+wrench_filter_window: 10        # samples
+
+# ── Speed profiles ────────────────────────────────────────────────
+normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
+slow_approach_speed: 0.10       # [m/s] absolute, in SLOW_APPROACH state
+probe_speed: 0.03               # [m/s] absolute, in CONTACT_PROBE state
+
+# ── Distance triggers ─────────────────────────────────────────────
+# Distance to perception obstacle (from local costmap) that triggers
+# state transitions. Should match inflation_radius in costmap_common.
+slow_approach_distance: 0.8     # [m] NORMAL_NAV → SLOW_APPROACH
+probe_distance: 0.25            # [m] SLOW_APPROACH → CONTACT_PROBE
+
+# ── Map update ────────────────────────────────────────────────────
+mark_radius: 0.2                # [m] radius around contact point to mark
+costmap_update_service: /move_base/global_costmap/update_cost   # placeholder
+
+# ── Timing ────────────────────────────────────────────────────────
+probe_timeout: 8.0              # [s] max time in CONTACT_PROBE before giving up
+contact_hold_time: 0.5          # [s] wrench must exceed threshold for this long

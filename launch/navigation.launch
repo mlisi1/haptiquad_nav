@@ -1,0 +1,62 @@
+<launch>
+  <!-- ============================================================
+       HaptiQuad Navigation Stack
+       Two-costmap architecture:
+         - free_costmap   : planner world (all free until confirmed solid)
+         - perception_costmap : sensor world (all detected obstacles)
+  ============================================================ -->
+
+  <arg name="robot_name"        default="anymal"/>
+  <arg name="odom_frame"        default="odom"/>
+  <arg name="base_frame"        default="base"/>
+  <arg name="map_frame"         default="map"/>
+  <arg name="use_sim_time"      default="true"/>
+  <arg name="map_server"        default="true"/>
+  <arg name="map_file"          default="$(find haptiquad_nav)/maps/empty.yaml"/>
+  <arg name="pointcloud_topic"  default="/lidar/point_cloud"/>
+  <arg name="wrench_topic"      default="/anymal/base_wrench"/>
+  <arg name="cmd_vel_topic"     default="/cmd_vel"/>
+
+  <param name="/use_sim_time" value="$(arg use_sim_time)"/>
+
+  <!-- ── Map server (empty map — all free) ─────────────────────── -->
+  <group if="$(arg map_server)">
+    <node name="map_server" pkg="map_server" type="map_server"
+          args="$(arg map_file)" output="screen">
+      <param name="frame_id" value="$(arg map_frame)"/>
+    </node>
+  </group>
+
+  <!-- ── move_base ─────────────────────────────────────────────── -->
+  <node name="move_base" pkg="move_base" type="move_base"
+        respawn="false" output="screen">
+
+    <rosparam file="$(find haptiquad_nav)/config/move_base.yaml"       command="load"/>
+    <rosparam file="$(find haptiquad_nav)/config/global_planner.yaml"  command="load" ns="GlobalPlanner"/>
+    <rosparam file="$(find haptiquad_nav)/config/local_planner.yaml"   command="load" ns="TrajectoryPlannerROS"/>
+    <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="global_costmap"/>
+    <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="local_costmap"/>
+    <rosparam file="$(find haptiquad_nav)/config/global_costmap.yaml"  command="load" ns="global_costmap"/>
+    <rosparam file="$(find haptiquad_nav)/config/local_costmap.yaml"   command="load" ns="local_costmap"/>
+
+    <remap from="cmd_vel" to="$(arg cmd_vel_topic)"/>
+    <remap from="odom"    to="/odom"/>
+  </node>
+
+  <!-- ── HaptiQuad contact-probe state machine ─────────────────── -->
+  <!-- <node name="contact_probe_manager" pkg="haptiquad_nav"
+        type="contact_probe_manager.py" output="screen">
+    <rosparam file="$(find haptiquad_nav)/config/contact_probe.yaml" command="load"/>
+    <remap from="base_wrench"        to="$(arg wrench_topic)"/>
+    <remap from="cmd_vel_out"        to="$(arg cmd_vel_topic)"/>
+  </node> -->
+
+  <!-- ── Pointcloud → LaserScan (for costmap obstacle layer) ───── -->
+  <node name="pointcloud_to_laserscan" pkg="pointcloud_to_laserscan"
+        type="pointcloud_to_laserscan_node" output="screen">
+    <remap from="cloud_in"   to="$(arg pointcloud_topic)"/>
+    <remap from="scan"       to="/scan_obstacles"/>
+    <rosparam file="$(find haptiquad_nav)/config/pc2scan.yaml" command="load"/>
+  </node>
+
+</launch>

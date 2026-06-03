@@ -1,0 +1,13 @@
+# pc2scan.yaml
+# Projects 3D pointcloud into a 2D laser scan for the costmap obstacle layer.
+# Tune min/max_height to capture only obstacles relevant to the robot body.
+
+min_height: 0.05        # [m] above base_link — ignore ground returns
+max_height: 0.8         # [m] above base_link — ignore returns above robot
+angle_min: -1.5708      # [rad] -90 deg
+angle_max:  1.5708      # [rad] +90 deg
+angle_increment: 0.0087 # [rad] ~0.5 deg resolution
+range_min: 0.1          # [m]
+range_max: 8.0          # [m]
+scan_time: 0.1          # [s]
+use_inf: false

@@ -1,0 +1,41 @@
+# local_planner.yaml
+# Using DWA local planner.
+# Velocity scaling near perception obstacles is handled by
+# contact_probe_manager, but DWA's own cost functions also
+# naturally slow down near high-cost cells (inflation layer).
+
+# ── Velocity limits ───────────────────────────────────────────────
+max_vel_x: 0.4                  # [m/s] normal forward speed
+min_vel_x: 0.0
+max_vel_theta: 0.6              # [rad/s]
+min_vel_theta: -0.6
+min_in_place_vel_theta: 0.3
+
+# Approach/probe speeds — contact_probe_manager will override
+# cmd_vel directly during SLOW_APPROACH and CONTACT_PROBE states
+max_vel_x_backwards: 0.15
+
+# ── Acceleration limits ───────────────────────────────────────────
+acc_lim_x: 0.5
+acc_lim_y: 0.0                  # non-holonomic
+acc_lim_theta: 1.0
+
+# ── Goal tolerances ───────────────────────────────────────────────
+xy_goal_tolerance: 0.15         # [m]
+yaw_goal_tolerance: 0.1         # [rad]
+latch_xy_goal_tolerance: false
+
+# ── Trajectory scoring ────────────────────────────────────────────
+# Raise path_distance_bias to keep robot on global path (straight line)
+path_distance_bias: 32.0
+goal_distance_bias: 20.0
+occdist_scale: 0.05             # penalty for passing near obstacles
+
+# ── Simulation ────────────────────────────────────────────────────
+sim_time: 1.5                   # [s] forward simulation horizon
+sim_granularity: 0.025
+vx_samples: 8
+vtheta_samples: 20
+
+# ── Footprint / holonomic ─────────────────────────────────────────
+holonomic_robot: true

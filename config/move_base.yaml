@@ -1,0 +1,22 @@
+# move_base.yaml
+# Top-level move_base parameters
+
+shutdown_costmaps: false
+controller_frequency: 10.0       # Hz — local planner update rate
+controller_patience: 15.0        # s  — before recovery behaviors kick in
+planner_frequency: 1.0           # Hz — global replan rate (low: we replan on demand)
+planner_patience: 5.0
+oscillation_timeout: 10.0
+oscillation_distance: 0.2
+
+# Recovery behaviors — keep minimal; contact_probe_manager handles probing
+recovery_behavior_enabled: true
+recovery_behaviors:
+  - name: conservative_reset
+    type: clear_costmap_recovery/ClearCostmapRecovery
+  - name: rotate_recovery
+    type: rotate_recovery/RotateRecovery
+  - name: aggressive_reset
+    type: clear_costmap_recovery/ClearCostmapRecovery
+
+conservative_reset_dist: 3.0
