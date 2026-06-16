@@ -6,16 +6,17 @@ controller_frequency: 10.0       # Hz — local planner update rate
 controller_patience: 15.0        # s  — before recovery behaviors kick in
 planner_frequency: 1.0           # Hz — global replan rate (low: we replan on demand)
 planner_patience: 5.0
-oscillation_timeout: 10.0
-oscillation_distance: 0.2
+oscillation_timeout: 120.0      # s — robot may sit at probe_speed (0.03 m/s) for up to
+                                # classify_time(2.5) + probe_timeout(15) × several cycles
+oscillation_distance: 0.5       # m — raised from 0.2: at 0.03 m/s the robot moves < 0.2 m
+                                # during a probe cycle, which was falsely flagging oscillation
 
-# Recovery behaviors — keep minimal; contact_probe_manager handles probing
+# Recovery behaviors — rotate_recovery removed: it spins the robot away from the
+# obstacle it is currently probing, breaking the contact classification sequence.
 recovery_behavior_enabled: true
 recovery_behaviors:
   - name: conservative_reset
     type: clear_costmap_recovery/ClearCostmapRecovery
-  - name: rotate_recovery
-    type: rotate_recovery/RotateRecovery
   - name: aggressive_reset
     type: clear_costmap_recovery/ClearCostmapRecovery
 

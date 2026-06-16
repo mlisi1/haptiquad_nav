@@ -15,7 +15,14 @@
   <arg name="map_file"          default="$(find haptiquad_nav)/maps/empty.yaml"/>
   <arg name="pointcloud_topic"  default="/lidar/point_cloud"/>
   <arg name="wrench_topic"      default="/anymal/base_wrench"/>
-  <arg name="cmd_vel_topic"     default="/cmd_vel"/>
+  <arg name="cmd_vel_topic"     default="/path_planning_and_following/twist"/>
+  <!-- move_base publishes raw cmd_vel here; contact_probe_manager gates it -->
+  <arg name="cmd_vel_raw_topic" default="/haptiquad_nav/cmd_vel_raw"/>
+  <!-- set to false if robot is already in walk mode -->
+  <arg name="init_robot"        default="true"/>
+  <!-- set to false to suppress RViz -->
+  <arg name="rviz"              default="false"/>
+  <arg name="rviz_config"       default="$(find haptiquad_nav)/config/navigation.rviz"/>
 
   <param name="/use_sim_time" value="$(arg use_sim_time)"/>
 
@@ -39,17 +46,52 @@
     <rosparam file="$(find haptiquad_nav)/config/global_costmap.yaml"  command="load" ns="global_costmap"/>
     <rosparam file="$(find haptiquad_nav)/config/local_costmap.yaml"   command="load" ns="local_costmap"/>
 
-    <remap from="cmd_vel" to="$(arg cmd_vel_topic)"/>
+    <!-- move_base publishes raw Twist here; contact_probe_manager gates it -->
+    <remap from="cmd_vel" to="$(arg cmd_vel_raw_topic)"/>
     <remap from="odom"    to="/odom"/>
   </node>
 
+  <!-- ── Odom bridge: pose_in_odom + twist → nav_msgs/Odometry ─── -->
+  <node name="odom_bridge" pkg="haptiquad_nav"
+        type="odom_bridge.py" output="screen"/>
+
+  <!-- ── Wrench bridge: EstimatedForces → WrenchStamped ────────── -->
+  <node name="wrench_bridge" pkg="haptiquad_nav"
+        type="wrench_bridge.py" output="screen">
+    <remap from="base_wrench" to="$(arg wrench_topic)"/>
+  </node>
+
   <!-- ── HaptiQuad contact-probe state machine ─────────────────── -->
-  <!-- <node name="contact_probe_manager" pkg="haptiquad_nav"
+  <node name="contact_probe_manager" pkg="haptiquad_nav"
         type="contact_probe_manager.py" output="screen">
     <rosparam file="$(find haptiquad_nav)/config/contact_probe.yaml" command="load"/>
-    <remap from="base_wrench"        to="$(arg wrench_topic)"/>
-    <remap from="cmd_vel_out"        to="$(arg cmd_vel_topic)"/>
-  </node> -->
+    <remap from="base_wrench"  to="$(arg wrench_topic)"/>
+    <remap from="cmd_vel_in"   to="$(arg cmd_vel_raw_topic)"/>
+    <remap from="cmd_vel_out"  to="$(arg cmd_vel_topic)"/>
+  </node>
+
+  <!-- ── Relay ANYmal RViz /goal → /move_base_simple/goal ─────── -->
+  <!-- The ANYmal RViz config publishes 2D Nav Goal to /goal, not the
+       move_base default /move_base_simple/goal. This relay bridges them. -->
+  <node pkg="topic_tools" type="relay" name="goal_relay"
+        args="/goal /move_base_simple/goal"/>
+
+  <!-- ── ANYmal motion initializer (estop clear + trekker walk) ── -->
+  <node if="$(arg init_robot)" name="anymal_motion_init"
+        pkg="haptiquad_anymal_bringup" type="init_motion.py" output="screen"/>
+
+  <!-- ── Debug perception costmap (visualization only) ─────────── -->
+  <!-- Rolling 20×20 m OccupancyGrid: shows scan_obstacles with inflation.
+       NOT connected to move_base — purely for RViz inspection.         -->
+  <node name="debug_costmap" pkg="haptiquad_nav"
+        type="debug_costmap.py" output="screen">
+    <param name="inflation_radius"    value="0.8"/>
+    <param name="cost_scaling_factor" value="5.0"/>
+  </node>
+
+  <!-- ── RViz ──────────────────────────────────────────────────── -->
+  <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
+        args="-d $(arg rviz_config)" output="screen"/>
 
   <!-- ── Pointcloud → LaserScan (for costmap obstacle layer) ───── -->
   <node name="pointcloud_to_laserscan" pkg="pointcloud_to_laserscan"

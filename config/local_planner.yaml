@@ -4,6 +4,9 @@
 # contact_probe_manager, but DWA's own cost functions also
 # naturally slow down near high-cost cells (inflation layer).
 
+# TF tolerance for plan-frame transform (localization_manager publishes ~8ms behind)
+transform_tolerance: 0.5      # [s]
+
 # ── Velocity limits ───────────────────────────────────────────────
 max_vel_x: 0.4                  # [m/s] normal forward speed
 min_vel_x: 0.0

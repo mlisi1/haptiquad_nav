@@ -2,12 +2,30 @@
 # Projects 3D pointcloud into a 2D laser scan for the costmap obstacle layer.
 # Tune min/max_height to capture only obstacles relevant to the robot body.
 
-min_height: 0.05        # [m] above base_link — ignore ground returns
-max_height: 0.8         # [m] above base_link — ignore returns above robot
+target_frame: base      # transform cloud into base frame before projecting —
+                        # ensures height filter is in base-link coords and the
+                        # output LaserScan frame_id is always in the TF tree
+
+# Height filter (base_link frame, ANYmal C stands ~0.55 m AGL):
+#   Ground in base_link: z ≈ −0.55 m  →  safely below min_height
+#   Box bottom (0 m AGL): z ≈ −0.55 m →  filtered (same as ground)
+#   Box at 0.25 m AGL:   z ≈ −0.30 m →  min_height boundary, start capturing
+#   Box at 1.00 m AGL:   z ≈ +0.45 m →  still within max_height
+# With min_height = −0.30 m the filter captures ~75% of each 1 m box versus
+# only ~40% with the previous min_height = 0.05 m.  Ground returns remain
+# at z ≈ −0.55 m and are still excluded.
+min_height: -0.30       # [m] in base_link — lowered to capture more of the obstacle boxes
+max_height:  1.20       # [m] in base_link — raised to capture full 1 m box top
+
 angle_min: -1.5708      # [rad] -90 deg
 angle_max:  1.5708      # [rad] +90 deg
 angle_increment: 0.0087 # [rad] ~0.5 deg resolution
-range_min: 0.1          # [m]
+
+# ANYmal C body extends roughly ±0.47 m (length) from base_link center.
+# Shoulder/hip corners are ~0.47 m from center; with some margin → 0.55 m.
+# Setting range_min = 0.55 m filters all robot body self-returns including
+# legs at max forward swing and the lidar cage structure.
+range_min: 0.55         # [m]
 range_max: 8.0          # [m]
 scan_time: 0.1          # [s]
 use_inf: false

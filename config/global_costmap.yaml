@@ -11,10 +11,27 @@ rolling_window: false
 transform_tolerance: 1.5
 
 # ── Layers ───────────────────────────────────────────────────────
-# NO obstacle_layer here — the global planner sees a free world.
-# Confirmed-solid obstacles will be injected programmatically.
+# NO perception obstacle_layer here — the global planner sees a free world.
+# Only confirmed-solid obstacles (from contact_probe_manager) are injected
+# via solid_obstacle_layer, which subscribes to /haptiquad_nav/solid_obstacles.
 plugins:
   - name: static_layer
     type: costmap_2d::StaticLayer
+  - name: solid_obstacle_layer
+    type: costmap_2d::ObstacleLayer
   - name: inflation_layer
     type: costmap_2d::InflationLayer
+
+solid_obstacle_layer:
+  enabled: true
+  observation_sources: solid_cloud
+  solid_cloud:
+    topic: /haptiquad_nav/solid_obstacles
+    sensor_frame: map
+    data_type: PointCloud2
+    marking: true
+    clearing: false             # Never clear — confirmed solids are permanent
+    obstacle_range: 500.0       # Accept points at any range from sensor origin
+    raytrace_range: 0.0         # No raytrace → no clearing between updates
+    observation_persistence: 0.0  # Keep observations forever
+    expected_update_rate: 0.0   # Don't warn about missing updates

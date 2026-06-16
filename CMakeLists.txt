@@ -14,6 +14,9 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   std_srvs
+  move_base_msgs
+  actionlib
+  tf
   rospy
 )
 
@@ -40,6 +43,8 @@ install(DIRECTORY maps/
 
 # Python nodes
 catkin_install_python(PROGRAMS
-  src/contact_probe_manager.py
+  scripts/wrench_bridge.py
+  scripts/odom_bridge.py
+  scripts/contact_probe_manager.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

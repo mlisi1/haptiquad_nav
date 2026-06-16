@@ -3,6 +3,7 @@
 
 robot_base_frame: base
 map_frame: map
+transform_tolerance: 0.5      # [s] allow TF lookups up to 0.5s stale (localization_manager has ~8ms latency)
 
 robot_radius: 0.35            # circumscribed radius of your quadruped [m]
 
