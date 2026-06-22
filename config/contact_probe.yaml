@@ -5,8 +5,10 @@
 # Forces in [N], torques in [Nm]
 # Contact is confirmed solid if ANY component exceeds its threshold.
 wrench_threshold:
-  fx: 15.0          # forward force — primary contact signal
-  fy: 10.0
+  fx: 150.0          # forward force — primary contact signal
+                    # (high value for testing solid-cube-only detection; lower to
+                    # ~10–15 N for light-cube detection above gait noise ~5-8 N)
+  fy: 150.0
   fz: 30.0          # vertical — usually terrain, be conservative
   tx: 3.0
   ty: 3.0
@@ -20,32 +22,80 @@ wrench_filter_window: 50        # samples
 
 # ── Speed profiles ────────────────────────────────────────────────
 normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
-slow_approach_speed: 0.10       # [m/s] absolute, in SLOW_APPROACH state
-probe_speed: 0.03               # [m/s] absolute, in CONTACT_PROBE state
+slow_approach_speed: 0.20       # [m/s] absolute, in SLOW_APPROACH state
+probe_speed: 0.1               # [m/s] absolute, in CONTACT_PROBE state
 
 # ── Distance triggers ─────────────────────────────────────────────
-# Distance to perception obstacle (from /scan_obstacles) that triggers
-# state transitions.
-slow_approach_distance: 0.75    # [m] NORMAL_NAV → SLOW_APPROACH
-                                # Kept slightly above probe_distance to give a brief deceleration
-                                # ramp. Was 0.80 m = inflation_radius, which made the robot enter
-                                # SLOW_APPROACH at the visible inflation boundary (looked premature).
+# Distance to nearest point in the forward ±45° sector (from 3D cloud).
+slow_approach_distance: 1.0     # [m] NORMAL_NAV → SLOW_APPROACH
+                                # Must be > cloud_range_min (0.55 m); 1.0 m gives
+                                # comfortable detection margin before the probe zone.
 probe_distance: 0.65            # [m] SLOW_APPROACH → CONTACT_PROBE
-                                # MUST be > pc2scan range_min (0.55 m, robot body exclusion radius).
-                                # Robot front ≈ 0.275 m ahead of base center → at probe_distance 0.65 m,
-                                # the robot front is ~0.375 m from the obstacle surface when probing starts.
-                                # At probe_speed 0.03 m/s this takes ~12.5 s, within probe_timeout (20 s).
+                                # Must be > cloud_range_min (0.55 m).
+                                # Robot front ≈ 0.275 m ahead of base → at 0.65 m
+                                # the front is ~0.375 m from the obstacle surface.
+
+# Only enter CONTACT_PROBE if the nearest obstacle is within this angle of the
+# robot's heading (base frame).  Prevents probing when the robot passes laterally
+# through a slow-approach zone without actually heading into the obstacle.
+probe_heading_max_deg: 25.0     # [deg] half-angle; tighten to reduce false triggers
+
+# How far past the detected obstacle face to place the probe goal.
+# Ensures the carrot planner drives the robot into the object so movable obstacles
+# actually get pushed.  goal_dist = obs_dist + probe_push_depth.
+probe_push_depth: 0.5           # [m]
 
 # ── Map update ────────────────────────────────────────────────────
-mark_radius: 0.2                # [m] radius around contact point to mark
-costmap_update_service: /move_base/global_costmap/update_cost   # placeholder
+mark_radius: 0.15                # [m] radius around contact point to mark
 
 # ── Timing ────────────────────────────────────────────────────────
-probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up (no wrench)
-                                # Robot front is ~0.375 m from obstacle when probing starts →
-                                # ~12.5 s at 0.03 m/s just to reach contact; 20 s gives 7.5 s margin.
-                                # Note: timeout is suspended once wrench exceeds threshold.
+probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up
+                                # Suspended once wrench exceeds threshold.
 contact_hold_time: 1.0          # [s] wrench must exceed threshold for this long
-                                # Increased from 0.5 s: gait oscillations can spike briefly above
-                                # thresholds; 1.0 s ensures the signal is sustained (real contact)
-classify_time: 2.5              # [s] forward push duration during classification
+classify_time: 1.5              # [s] forward push duration during classification
+
+# ── Back-up after SOLID detection ─────────────────────────────────
+# After classifying an obstacle as SOLID, the robot reverses briefly so
+# move_base has enough clearance to plan a path around the obstacle.
+# backup_clearance = robot_radius + inflation_radius + backup_extra_margin
+#   = 0.55 + 0.80 + 0.25 = 1.60 m
+# This guarantees the robot centre is outside the inflation lethal zone
+# before the user goal is re-sent (NavFnROS refuses to plan from lethal cells).
+robot_radius: 0.55              # [m] must match costmap_common.yaml robot_radius
+inflation_radius: 0.80          # [m] must match costmap_common.yaml inflation_radius
+backup_extra_margin: 0.25       # [m] clearance beyond the inflation boundary
+
+backup_min_clearance: 0.60      # [m] UNKNOWN-obstacle-only rear safety stop.
+                                # Classified solids are excluded from this check.
+                                # Must be > robot_radius (0.55 m).
+backup_speed: 0.20              # [m/s] reverse speed during BACKING_UP state
+
+backup_time: 20.0               # [s] fallback maximum backup duration.
+
+# After backup completes, suppress SLOW_APPROACH for this many seconds so the
+# robot can begin moving along the replanned path before obstacle detection
+# resumes (avoids immediately re-entering SLOW_APPROACH near the marked solid).
+post_backup_cooldown: 0.5       # [s]  solid_excl_radius + heading check prevent re-probing
+
+# ── 3D point cloud processing ─────────────────────────────────────
+# Applied to the raw lidar PointCloud2 (topic: point_cloud_in) after
+# transforming to base_link frame.  Heights and ranges are in metres.
+#
+# ANYmal C base_link is ~0.55 m AGL at nominal stance.
+# Box geometry (1.0 m tall, ground-level): in base_link z ∈ [-0.55, +0.45].
+#   min_height = -0.30 captures 75% of the box while excluding the ground.
+# Robot body self-returns: max ~0.47 m from base centre; range_min = 0.55 m
+# excludes them with margin.
+cloud_height_min: -0.10         # [m] base frame — exclude ground + low-angle ground rings
+                                # −0.10 m = 0.45 m AGL; captures top 55% of 1 m boxes
+                                # while eliminating Gazebo ground-plane ring artifacts
+cloud_height_max:  1.20         # [m] base frame — include full 1 m box top
+cloud_range_min:   0.55         # [m] exclude robot body self-returns
+cloud_range_max:   8.0          # [m]
+forward_sector_deg: 45.0        # [deg] half-angle of forward detection cone (±sector)
+
+# Exclusion zone around confirmed solid obstacles.
+# Once an obstacle is classified SOLID, cloud points within this radius are
+# ignored when computing _nearest_obs — prevents SLOW_APPROACH from re-firing
+# as the robot navigates around the confirmed obstacle on the replanned path.
+solid_excl_radius: 0.7          # [m] ≥ box half-diagonal (0.35 m) + margin

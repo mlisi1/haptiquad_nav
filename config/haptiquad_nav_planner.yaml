@@ -1,0 +1,20 @@
+# haptiquad_nav_planner.yaml — HaptiQuadNavPlanner parameters
+# Loaded under move_base/HaptiQuadNavPlanner/
+
+max_vel_x:          0.60    # [m/s] max forward speed
+max_vel_y:          0.60    # [m/s] max lateral speed
+
+lookahead_dist:     1.0     # [m] distance ahead on the global plan to target
+
+# Speed ramp: linear decay from max_vel_x to min_speed as distance to goal
+# goes from slow_down_dist to 0.
+slow_down_dist:     1.5     # [m] start ramping down at this distance from goal
+min_speed:          0.05    # [m/s] minimum speed during ramp (stops at goal tolerance)
+
+xy_goal_tolerance:  0.15    # [m]
+yaw_goal_tolerance: 0.10    # [rad]
+
+# Heading correction: P-controller toward final goal yaw, active throughout the
+# path so the robot arrives already aligned.  Runs concurrently with strafe motion.
+heading_kp:         1.0     # [1/s] proportional gain
+heading_max_omega:  0.5     # [rad/s] saturation limit

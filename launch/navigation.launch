@@ -16,7 +16,7 @@
   <arg name="pointcloud_topic"  default="/lidar/point_cloud"/>
   <arg name="wrench_topic"      default="/anymal/base_wrench"/>
   <arg name="cmd_vel_topic"     default="/path_planning_and_following/twist"/>
-  <!-- move_base publishes raw cmd_vel here; contact_probe_manager gates it -->
+  <!-- move_base publishes raw Twist here; twist_stamper wraps it as TwistStamped -->
   <arg name="cmd_vel_raw_topic" default="/haptiquad_nav/cmd_vel_raw"/>
   <!-- set to false if robot is already in walk mode -->
   <arg name="init_robot"        default="true"/>
@@ -40,13 +40,13 @@
 
     <rosparam file="$(find haptiquad_nav)/config/move_base.yaml"       command="load"/>
     <rosparam file="$(find haptiquad_nav)/config/global_planner.yaml"  command="load" ns="GlobalPlanner"/>
-    <rosparam file="$(find haptiquad_nav)/config/local_planner.yaml"   command="load" ns="TrajectoryPlannerROS"/>
+    <rosparam file="$(find haptiquad_nav)/config/haptiquad_nav_planner.yaml"  command="load" ns="HaptiQuadNavPlanner"/>
     <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="global_costmap"/>
     <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="local_costmap"/>
     <rosparam file="$(find haptiquad_nav)/config/global_costmap.yaml"  command="load" ns="global_costmap"/>
     <rosparam file="$(find haptiquad_nav)/config/local_costmap.yaml"   command="load" ns="local_costmap"/>
 
-    <!-- move_base publishes raw Twist here; contact_probe_manager gates it -->
+    <!-- move_base publishes raw Twist here; twist_stamper wraps it for twist_mux -->
     <remap from="cmd_vel" to="$(arg cmd_vel_raw_topic)"/>
     <remap from="odom"    to="/odom"/>
   </node>
@@ -61,13 +61,23 @@
     <remap from="base_wrench" to="$(arg wrench_topic)"/>
   </node>
 
+  <!-- ── Twist → TwistStamped adapter (move_base → twist_mux) ────── -->
+  <!-- move_base publishes plain Twist; twist_mux expects TwistStamped. -->
+  <node name="twist_stamper" pkg="haptiquad_nav"
+        type="twist_stamper.py" output="screen">
+    <remap from="cmd_vel_in"  to="$(arg cmd_vel_raw_topic)"/>
+    <remap from="cmd_vel_out" to="$(arg cmd_vel_topic)"/>
+  </node>
+
   <!-- ── HaptiQuad contact-probe state machine ─────────────────── -->
+  <!-- contact_probe_manager is NOT in the velocity pipeline.
+       It manages move_base goals via actionlib and publishes
+       /haptiquad_nav/speed_limit consumed by the carrot planner. -->
   <node name="contact_probe_manager" pkg="haptiquad_nav"
         type="contact_probe_manager.py" output="screen">
     <rosparam file="$(find haptiquad_nav)/config/contact_probe.yaml" command="load"/>
-    <remap from="base_wrench"  to="$(arg wrench_topic)"/>
-    <remap from="cmd_vel_in"   to="$(arg cmd_vel_raw_topic)"/>
-    <remap from="cmd_vel_out"  to="$(arg cmd_vel_topic)"/>
+    <remap from="base_wrench"    to="$(arg wrench_topic)"/>
+    <remap from="point_cloud_in" to="$(arg pointcloud_topic)"/>
   </node>
 
   <!-- ── Relay ANYmal RViz /goal → /move_base_simple/goal ─────── -->
@@ -81,24 +91,26 @@
         pkg="haptiquad_anymal_bringup" type="init_motion.py" output="screen"/>
 
   <!-- ── Debug perception costmap (visualization only) ─────────── -->
-  <!-- Rolling 20×20 m OccupancyGrid: shows scan_obstacles with inflation.
-       NOT connected to move_base — purely for RViz inspection.         -->
+  <!-- Rolling 20×20 m OccupancyGrid built directly from the raw 3D lidar
+       cloud (same source as contact_probe_manager, 360° coverage).
+       Confirmed solid obstacles are suppressed — they live in the global
+       costmap. NOT connected to move_base — purely for RViz inspection. -->
   <node name="debug_costmap" pkg="haptiquad_nav"
         type="debug_costmap.py" output="screen">
-    <param name="inflation_radius"    value="0.8"/>
-    <param name="cost_scaling_factor" value="5.0"/>
+    <param name="inflation_radius"    value="0.80"/>
+    <param name="cost_scaling_factor" value="3.0"/>
+    <param name="robot_radius"        value="0.55"/>
+    <param name="solid_excl_radius"   value="0.7"/>
+    <param name="cloud_height_min"    value="-0.10"/>
+    <param name="cloud_height_max"    value="1.20"/>
+    <param name="cloud_range_min"     value="0.55"/>
+    <param name="cloud_range_max"     value="8.0"/>
+    <remap from="point_cloud_in"      to="$(arg pointcloud_topic)"/>
   </node>
 
   <!-- ── RViz ──────────────────────────────────────────────────── -->
   <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
         args="-d $(arg rviz_config)" output="screen"/>
 
-  <!-- ── Pointcloud → LaserScan (for costmap obstacle layer) ───── -->
-  <node name="pointcloud_to_laserscan" pkg="pointcloud_to_laserscan"
-        type="pointcloud_to_laserscan_node" output="screen">
-    <remap from="cloud_in"   to="$(arg pointcloud_topic)"/>
-    <remap from="scan"       to="/scan_obstacles"/>
-    <rosparam file="$(find haptiquad_nav)/config/pc2scan.yaml" command="load"/>
-  </node>
 
 </launch>

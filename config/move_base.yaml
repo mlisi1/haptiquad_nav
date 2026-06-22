@@ -1,23 +1,23 @@
 # move_base.yaml
 # Top-level move_base parameters
 
+base_global_planner: global_planner/GlobalPlanner   # activates GlobalPlanner plugin; params live in ns="GlobalPlanner"
+base_local_planner:  haptiquad_nav/HaptiQuadNavPlanner
 shutdown_costmaps: false
 controller_frequency: 10.0       # Hz — local planner update rate
 controller_patience: 15.0        # s  — before recovery behaviors kick in
-planner_frequency: 1.0           # Hz — global replan rate (low: we replan on demand)
+planner_frequency: 10.0           # Hz — frequent enough for tight inflation-zone routing
 planner_patience: 5.0
 oscillation_timeout: 120.0      # s — robot may sit at probe_speed (0.03 m/s) for up to
                                 # classify_time(2.5) + probe_timeout(15) × several cycles
 oscillation_distance: 0.5       # m — raised from 0.2: at 0.03 m/s the robot moves < 0.2 m
                                 # during a probe cycle, which was falsely flagging oscillation
 
-# Recovery behaviors — rotate_recovery removed: it spins the robot away from the
-# obstacle it is currently probing, breaking the contact classification sequence.
-recovery_behavior_enabled: true
-recovery_behaviors:
-  - name: conservative_reset
-    type: clear_costmap_recovery/ClearCostmapRecovery
-  - name: aggressive_reset
-    type: clear_costmap_recovery/ClearCostmapRecovery
-
-conservative_reset_dist: 3.0
+# Recovery behaviors disabled: ClearCostmapRecovery wipes the global costmap,
+# destroying confirmed solid-obstacle marks.  The latched /solid_obstacles topic
+# does NOT re-deliver to an existing subscriber after a costmap reset, so the
+# marks are permanently lost and the robot drives through the cleared space.
+# rotate_recovery was already removed (it breaks the contact-probe sequence).
+# Without recovery behaviors move_base simply aborts the goal if stuck; the
+# contact_probe_manager re-sends it after every solid classification anyway.
+recovery_behavior_enabled: false

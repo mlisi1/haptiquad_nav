@@ -1,0 +1,12 @@
+<library path="lib/libhaptiquad_nav_planner">
+  <class name="haptiquad_nav/HaptiQuadNavPlanner"
+         type="haptiquad_nav::HaptiQuadNavPlanner"
+         base_class_type="nav_core::BaseLocalPlanner">
+    <description>
+      Holonomic lookahead local planner for the HaptiQuad tactile-navigation system.
+      Strafes the robot directly toward a lookahead point on the global plan while
+      applying a concurrent yaw P-controller toward the final goal heading.
+      Subscribes to /haptiquad_nav/speed_limit for contact-probe speed capping.
+    </description>
+  </class>
+</library>

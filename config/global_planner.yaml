@@ -1,13 +1,13 @@
 # global_planner.yaml
-# Using navfn (Dijkstra/A*) on the all-free global costmap.
-# Since the map is free, plans will be straight lines to goal.
+# global_planner/GlobalPlanner on the all-free global costmap.
+# Loaded under ns="GlobalPlanner" in navigation.launch.
+# base_global_planner is set to global_planner/GlobalPlanner in move_base.yaml.
 
 allow_unknown: true             # navigate in unmapped areas
 default_tolerance: 0.2          # [m] goal tolerance for planner
-visualize_potential: false
+visualize_potential: true       # publishes potential field on ~/potential for RViz
 
-# Alternatively use GlobalPlanner (more configurable):
-# use_dijkstra: true
-# use_quadratic: true
-# use_grid_path: false
-# old_navfn_behavior: false
+use_dijkstra: true
+use_quadratic: true
+use_grid_path: false
+old_navfn_behavior: false

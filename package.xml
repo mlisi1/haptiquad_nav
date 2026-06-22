@@ -5,12 +5,21 @@
   <description>
     HaptiQuad navigation stack — contact-based obstacle classification
     using GRF/base wrench estimation with a dual-costmap architecture.
+    Includes the HaptiQuadNavPlanner nav_core plugin.
   </description>
 
-  <maintainer email="michele.lisi@phd.unipi.it">Michele Lisi</maintainer>
+  <maintainer email="elechim2196@gmail.com">mlisi1</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- C++ local planner plugin deps -->
+  <depend>angles</depend>
+  <depend>pluginlib</depend>
+  <depend>roscpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
 
   <!-- Core nav deps -->
   <depend>move_base</depend>
@@ -30,9 +39,6 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
 
-  <!-- Pointcloud → laserscan bridge -->
-  <depend>pointcloud_to_laserscan</depend>
-
   <!-- Goal relay: ANYmal RViz publishes 2D Nav Goal to /goal, we relay it -->
   <depend>topic_tools</depend>
 
@@ -45,5 +51,6 @@
   <exec_depend>python3-numpy</exec_depend>
 
   <export>
+    <nav_core plugin="${prefix}/haptiquad_nav_planner_plugin.xml"/>
   </export>
 </package>

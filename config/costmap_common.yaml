@@ -5,28 +5,13 @@ robot_base_frame: base
 map_frame: map
 transform_tolerance: 0.5      # [s] allow TF lookups up to 0.5s stale (localization_manager has ~8ms latency)
 
-robot_radius: 0.35            # circumscribed radius of your quadruped [m]
-
-# ── Obstacle layer (perception_costmap equivalent) ───────────────
-# This layer sees ALL detected obstacles from the pointcloud scan.
-# The global planner will NOT use this — see global_costmap.yaml.
-# The local planner WILL use this for velocity scaling.
-obstacle_layer:
-  enabled: true
-  observation_sources: scan_obstacles
-  scan_obstacles:
-    sensor_frame: base
-    data_type: LaserScan
-    topic: /scan_obstacles
-    marking: true
-    clearing: true
-    obstacle_range: 4.0         # max range to mark [m]
-    raytrace_range: 5.0         # max range to clear [m]
-    inf_is_valid: false
+robot_radius: 0.55            # circumscribed radius [m] — ANYmal C body half-width
+                              # 0.75 m was tried but caused lethal-zone overlap between
+                              # adjacent cubes (1.0 m face-to-face gap), leaving no valid
+                              # NavFnROS start position after backup — robot spun in place.
 
 # ── Inflation layer ───────────────────────────────────────────────
-# inflation_radius = the deceleration zone around perception obstacles
 inflation_layer:
   enabled: true
-  inflation_radius: 0.8         # [m] — tune: triggers slow-approach zone
-  cost_scaling_factor: 5.0      # higher = steeper cost dropoff from obstacle
+  inflation_radius: 0.80         # [m] clearance buffer around lethal cells
+  cost_scaling_factor: 3.0       # higher = steeper cost dropoff from obstacle

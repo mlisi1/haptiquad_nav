@@ -1,6 +1,6 @@
 # local_costmap.yaml
-# The local planner's world: rolling window that DOES see
-# perception obstacles, used for velocity scaling during approach.
+# The local planner's world: intentionally all-free (no obstacle_layer).
+# The contact_probe_manager gates velocity directly from the 3D lidar cloud.
 
 global_frame: map
 rolling_window: true
