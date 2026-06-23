@@ -67,6 +67,7 @@ class ContactProbeManager:
         self._backup_min_clear = rospy.get_param('backup_min_clearance', 0.60)
         self._backup_time   = rospy.get_param('backup_time', 20.0)
         self._post_backup_cooldown = rospy.get_param('post_backup_cooldown', 3.0)
+        self._obstacle_depth = rospy.get_param('obstacle_assumed_depth', 0.5)
 
         self._probe_push_depth = rospy.get_param('probe_push_depth', 0.5)
         _probe_heading_deg     = rospy.get_param('probe_heading_max_deg', 25.0)
@@ -80,6 +81,10 @@ class ContactProbeManager:
         self._fwd_sector   = math.radians(rospy.get_param('forward_sector_deg', 45.0))
         solid_excl         = rospy.get_param('solid_excl_radius', 0.7)
         self._solid_excl_r2 = solid_excl ** 2
+        movable_excl        = rospy.get_param('movable_excl_radius', 1.5)
+        self._movable_excl_r2 = movable_excl ** 2
+        self._movable_track_r    = rospy.get_param('movable_track_radius', 0.5)
+        self._movable_track_min  = rospy.get_param('movable_track_min_pts', 3)
 
         # ── State ─────────────────────────────────────────────────────────────
         self._state = NORMAL_NAV
@@ -102,6 +107,7 @@ class ContactProbeManager:
         self._nearest_rear_obs  = float('inf')
         self._nearest_fwd_raw       = float('inf')
         self._last_fwd_pts_raw_map  = None   # (N,2) map-frame forward pts
+        self._last_all_pts_map      = None   # (N,2) map-frame full-360° pts
 
         # ── Robot pose (map frame) ────────────────────────────────────────────
         self._robot_x   = 0.0
@@ -122,6 +128,12 @@ class ContactProbeManager:
         self._solid_obstacles = []   # list of (x, y, z) centers
         self._solid_pts       = []   # list of [(x,y,z)...] — actual lidar pts per solid
 
+        # ── Confirmed movable obstacle list ───────────────────────────────────
+        # Contact centers of obstacles classified as movable.  Excluded from
+        # _nearest_obs so the robot does not re-trigger SLOW_APPROACH after
+        # pushing through.  NOT published to the costmap.
+        self._movable_obstacles = []   # list of (x, y, z) contact centers
+
         # ── Post-backup cooldown ──────────────────────────────────────────────
         self._backup_cooldown_until = rospy.Time(0)
 
@@ -137,6 +149,8 @@ class ContactProbeManager:
             '/haptiquad_nav/speed_limit', Float64, queue_size=1, latch=True)
         self._obstacles_pub = rospy.Publisher(
             '/haptiquad_nav/solid_obstacles', PointCloud2, queue_size=1, latch=True)
+        self._movable_pub = rospy.Publisher(
+            '/haptiquad_nav/movable_obstacles', PointCloud2, queue_size=1, latch=True)
 
         # Publish uncapped speed at startup
         self._set_speed_limit(float('inf'))
@@ -158,6 +172,7 @@ class ContactProbeManager:
         # ── Main loop ─────────────────────────────────────────────────────────
         rospy.Timer(rospy.Duration(0.1), self._update)
         rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_obstacles())
+        rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_movable_obstacles())
 
         rospy.loginfo(
             '[ContactProbe] Started. cloud h=[%.2f,%.2f] r=[%.2f,%.2f] sector=±%.0f°',
@@ -259,6 +274,37 @@ class ContactProbeManager:
         else:
             self._nearest_rear_obs = float('inf')
 
+        # Full-360° map-frame snapshot (height+range filtered, no sector cut)
+        # Used by _refine_last_solid to capture side faces visible after backup.
+        if xb.size > 0:
+            cy_a = math.cos(self._robot_yaw)
+            sy_a = math.sin(self._robot_yaw)
+            self._last_all_pts_map = np.stack(
+                [self._robot_x + xb * cy_a - yb * sy_a,
+                 self._robot_y + xb * sy_a + yb * cy_a], axis=1)
+        else:
+            self._last_all_pts_map = None
+
+        # Refine stored movable obstacle positions from the current full-360° scan.
+        # Only updates when the obstacle is outside the lidar blind spot so that
+        # erroneous updates don't happen while the robot is actively pushing it.
+        if self._movable_obstacles and self._last_all_pts_map is not None:
+            pts_map = self._last_all_pts_map
+            changed = False
+            for i, (mox, moy, moz) in enumerate(self._movable_obstacles):
+                if math.hypot(mox - self._robot_x, moy - self._robot_y) < self._cloud_r_min:
+                    continue  # in blind spot
+                known = np.array([mox, moy])
+                d2 = np.linalg.norm(pts_map - known[np.newaxis, :], axis=1)
+                near = pts_map[d2 <= self._movable_track_r]
+                if near.shape[0] >= self._movable_track_min:
+                    cx, cy = float(near[:, 0].mean()), float(near[:, 1].mean())
+                    if math.hypot(cx - mox, cy - moy) > 0.01:
+                        self._movable_obstacles[i] = (cx, cy, moz)
+                        changed = True
+            if changed:
+                self._publish_movable_obstacles()
+
         # Forward sector
         a_ok = np.abs(angles) <= self._fwd_sector
         xb, yb, r = xb[a_ok], yb[a_ok], r[a_ok]
@@ -275,8 +321,9 @@ class ContactProbeManager:
         else:
             self._last_fwd_pts_raw_map = None
 
-        # Exclude confirmed solid obstacles from forward nearest-obstacle computation
-        if self._solid_obstacles and r.size > 0:
+        # Exclude confirmed solid and movable obstacles from nearest-obstacle
+        # computation so neither re-triggers SLOW_APPROACH.
+        if (self._solid_obstacles or self._movable_obstacles) and r.size > 0:
             cyw = math.cos(self._robot_yaw)
             syw = math.sin(self._robot_yaw)
             keep = np.ones(r.size, dtype=bool)
@@ -286,7 +333,13 @@ class ContactProbeManager:
                 sbx =  dx * cyw + dy * syw
                 sby = -dx * syw + dy * cyw
                 keep &= (xb - sbx)**2 + (yb - sby)**2 > self._solid_excl_r2
-            r = r[keep]
+            for mox, moy, _ in self._movable_obstacles:
+                dx = mox - self._robot_x
+                dy = moy - self._robot_y
+                mbx =  dx * cyw + dy * syw
+                mby = -dx * syw + dy * cyw
+                keep &= (xb - mbx)**2 + (yb - mby)**2 > self._movable_excl_r2
+            xb, yb, r = xb[keep], yb[keep], r[keep]
             angles_fwd = angles_fwd[keep]
 
         if r.size > 0:
@@ -358,30 +411,80 @@ class ContactProbeManager:
         cloud.data       = b''.join(struct.pack('fff', *p) for p in pts)
         self._obstacles_pub.publish(cloud)
 
-    def _refine_last_solid(self):
-        """Mark the solid obstacle in the costmap using the current forward lidar scan.
+    def _publish_movable_obstacles(self):
+        if not self._movable_obstacles:
+            return
+        pts = [(float(x), float(y), 0.0) for x, y, _ in self._movable_obstacles]
+        cloud = PointCloud2()
+        cloud.header.stamp = rospy.Time.now()
+        cloud.header.frame_id = 'map'
+        cloud.height = 1
+        cloud.width  = len(pts)
+        cloud.fields = [
+            PointField('x', 0,  PointField.FLOAT32, 1),
+            PointField('y', 4,  PointField.FLOAT32, 1),
+            PointField('z', 8,  PointField.FLOAT32, 1),
+        ]
+        cloud.is_bigendian = False
+        cloud.point_step = 12
+        cloud.row_step   = 12 * len(pts)
+        cloud.is_dense   = True
+        cloud.data       = b''.join(struct.pack('fff', *p) for p in pts)
+        self._movable_pub.publish(cloud)
 
-        Called at the end of BACKING_UP so the robot is already clear of the lethal
-        zone before the mark is published.  Falls back to a provisional ring if no
-        lidar points are available near the known solid center.
+    def _refine_last_solid(self):
+        """Mark the solid obstacle as a filled rectangle in the costmap.
+
+        The front face width is measured from the lidar scan; the depth is
+        extruded in the probe approach direction by obstacle_assumed_depth.
+        Called at the end of BACKING_UP once the robot is clear.
+        Falls back to a provisional ring if no lidar data is available.
         """
         if not self._solid_obstacles:
             return
         cx_known = self._solid_obstacles[-1][0]
         cy_known = self._solid_obstacles[-1][1]
 
-        pts_map = self._last_fwd_pts_raw_map
-        lidar_pts = []
+        pts_map = self._last_all_pts_map
+        near = np.empty((0, 2))
         if pts_map is not None and pts_map.shape[0] > 0:
             known_pos = np.array([cx_known, cy_known])
             dists = np.linalg.norm(pts_map - known_pos[np.newaxis, :], axis=1)
             near = pts_map[dists <= 0.75]
-            lidar_pts = [(float(r[0]), float(r[1]), 0.0) for r in near]
 
-        if lidar_pts:
-            self._solid_pts[-1] = lidar_pts
-            rospy.loginfo('[ContactProbe] Marked solid at (%.2f,%.2f) — %d lidar pts',
-                          cx_known, cy_known, len(lidar_pts))
+        if near.shape[0] > 0:
+            # Orthonormal basis aligned to the approach direction.
+            # dx/dy: into the obstacle; px/py: along the face.
+            dx =  math.cos(self._probe_entry_yaw)
+            dy =  math.sin(self._probe_entry_yaw)
+            px = -dy
+            py =  dx
+
+            proj_face  = near[:, 0] * px + near[:, 1] * py
+            proj_depth = near[:, 0] * dx + near[:, 1] * dy
+
+            depth_front = float(proj_depth.min())
+            face_lo = float(proj_face.min())
+            face_hi = float(proj_face.max())
+
+            # Dense grid covering front-face width × assumed depth.
+            step = 0.05
+            face_vals  = np.arange(face_lo - step, face_hi + step * 1.5, step)
+            depth_vals = np.arange(depth_front,
+                                   depth_front + self._obstacle_depth + step * 0.5,
+                                   step)
+
+            pts = [(float(fv * px + dv * dx),
+                    float(fv * py + dv * dy), 0.0)
+                   for fv in face_vals
+                   for dv in depth_vals]
+
+            self._solid_pts[-1] = pts
+            rospy.loginfo(
+                '[ContactProbe] Marked solid at (%.2f,%.2f) — %d pts '
+                '(face %.2fm × depth %.2fm)',
+                cx_known, cy_known, len(pts),
+                face_hi - face_lo, self._obstacle_depth)
         else:
             ox, oy = cx_known, cy_known
             prov = [(ox, oy, 0.0)]
@@ -577,9 +680,18 @@ class ContactProbeManager:
 
                 if forward > movable_threshold:
                     rospy.loginfo(
-                        '[ContactProbe] MOVABLE — Δfwd=%.3fm > %.3fm '
+                        '[ContactProbe] MOVABLE at (%.2f, %.2f) — Δfwd=%.3fm > %.3fm '
                         '[wrench_drop=%s w_now=%.1f w_init=%.1f]',
+                        self._contact_point[0], self._contact_point[1],
                         forward, movable_threshold, wrench_dropped, w_now, w_init)
+                    # Seed at contact_point + measured push so the tracking
+                    # radius covers the actual post-push position immediately.
+                    pushed = (
+                        self._contact_point[0] + forward * math.cos(self._probe_entry_yaw),
+                        self._contact_point[1] + forward * math.sin(self._probe_entry_yaw),
+                        0.0)
+                    self._movable_obstacles.append(pushed)
+                    self._publish_movable_obstacles()
                     self._enter(NORMAL_NAV)
                 else:
                     rospy.logwarn(

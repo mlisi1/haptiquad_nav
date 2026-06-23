@@ -23,7 +23,8 @@ wrench_filter_window: 50        # samples
 # ── Speed profiles ────────────────────────────────────────────────
 normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
 slow_approach_speed: 0.20       # [m/s] absolute, in SLOW_APPROACH state
-probe_speed: 0.1               # [m/s] absolute, in CONTACT_PROBE state
+probe_speed: 0.25              # [m/s] absolute, in CONTACT_PROBE state
+                               # 0.1 m/s was too slow to push 5 kg / mu=0.05 boxes (~2.5 N friction)
 
 # ── Distance triggers ─────────────────────────────────────────────
 # Distance to nearest point in the forward ±45° sector (from 3D cloud).
@@ -46,7 +47,12 @@ probe_heading_max_deg: 25.0     # [deg] half-angle; tighten to reduce false trig
 probe_push_depth: 0.5           # [m]
 
 # ── Map update ────────────────────────────────────────────────────
-mark_radius: 0.15                # [m] radius around contact point to mark
+mark_radius: 0.15                # [m] radius used by the provisional-ring fallback
+# Assumed obstacle depth extruded behind the measured front face.
+# The front face width is measured from the lidar; this depth synthesises the
+# sides so the costmap rectangle covers the full obstacle footprint.
+# Set to the largest obstacle depth you expect to encounter (m).
+obstacle_assumed_depth: 0.5     # [m] test-world cubes are 0.5 m deep
 
 # ── Timing ────────────────────────────────────────────────────────
 probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up
@@ -70,12 +76,12 @@ backup_min_clearance: 0.60      # [m] UNKNOWN-obstacle-only rear safety stop.
                                 # Must be > robot_radius (0.55 m).
 backup_speed: 0.20              # [m/s] reverse speed during BACKING_UP state
 
-backup_time: 20.0               # [s] fallback maximum backup duration.
+backup_time: 10.0               # [s] fallback maximum backup duration.
 
 # After backup completes, suppress SLOW_APPROACH for this many seconds so the
 # robot can begin moving along the replanned path before obstacle detection
 # resumes (avoids immediately re-entering SLOW_APPROACH near the marked solid).
-post_backup_cooldown: 0.5       # [s]  solid_excl_radius + heading check prevent re-probing
+post_backup_cooldown: 0.0       # [s]  solid_excl_radius + heading check prevent re-probing
 
 # ── 3D point cloud processing ─────────────────────────────────────
 # Applied to the raw lidar PointCloud2 (topic: point_cloud_in) after
@@ -99,3 +105,20 @@ forward_sector_deg: 45.0        # [deg] half-angle of forward detection cone (±
 # ignored when computing _nearest_obs — prevents SLOW_APPROACH from re-firing
 # as the robot navigates around the confirmed obstacle on the replanned path.
 solid_excl_radius: 0.7          # [m] ≥ box half-diagonal (0.35 m) + margin
+
+# Exclusion zone around confirmed MOVABLE obstacle contact centers.
+# Larger than solid_excl_radius because the obstacle drifts from its recorded
+# position as the robot pushes through.  Points within this radius are dropped
+# from _nearest_obs so the robot does not re-trigger SLOW_APPROACH.
+# NOT used for costmap marking (movable obstacles are never written to the costmap).
+movable_excl_radius: 1.5        # [m] contact_point ± expected push travel + margin
+
+# Lidar-based movable obstacle tracking.
+# Each cloud callback, for every confirmed movable obstacle outside the blind
+# spot, the node searches for lidar returns within movable_track_radius of the
+# stored center and updates the center to their centroid.  This keeps the
+# exclusion zone centered on the obstacle's actual position as it gets pushed.
+# movable_track_radius must be < (nearest solid obstacle distance / 2) to avoid
+# stealing returns from unrelated objects.
+movable_track_radius: 0.5       # [m] search radius around stored movable center
+movable_track_min_pts: 3        # minimum lidar returns required to accept an update

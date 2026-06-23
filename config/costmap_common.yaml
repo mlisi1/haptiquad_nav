@@ -5,10 +5,12 @@ robot_base_frame: base
 map_frame: map
 transform_tolerance: 0.5      # [s] allow TF lookups up to 0.5s stale (localization_manager has ~8ms latency)
 
-robot_radius: 0.55            # circumscribed radius [m] — ANYmal C body half-width
-                              # 0.75 m was tried but caused lethal-zone overlap between
-                              # adjacent cubes (1.0 m face-to-face gap), leaving no valid
-                              # NavFnROS start position after backup — robot spun in place.
+# ANYmal C body from URDF collision box: 1.05 × 0.50 m.
+# Using the actual polygon gives accurate collision checking (inscribed r=0.25 m,
+# circumscribed r≈0.58 m) and lets the robot thread narrower gaps than the old
+# 0.55 m circle allowed in the lateral direction.
+footprint: [[0.525, 0.25], [-0.525, 0.25], [-0.525, -0.25], [0.525, -0.25]]
+footprint_padding: 0.02       # [m] small safety margin added to polygon
 
 # ── Inflation layer ───────────────────────────────────────────────
 inflation_layer:
