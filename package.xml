@@ -26,6 +26,7 @@
   <depend>nav_core</depend>
   <depend>costmap_2d</depend>
   <depend>navfn</depend>
+  <depend>global_planner</depend>
   <depend>base_local_planner</depend>
   <depend>dwa_local_planner</depend>
   <depend>rotate_recovery</depend>
@@ -38,6 +39,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>diagnostic_msgs</depend>
 
   <!-- Goal relay: ANYmal RViz publishes 2D Nav Goal to /goal, we relay it -->
   <depend>topic_tools</depend>

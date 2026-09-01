@@ -23,12 +23,14 @@ import tf.transformations
 import tf2_ros
 import actionlib
 
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
                                 PoseWithCovarianceStamped)
 from sensor_msgs.msg import PointCloud2, PointField
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from actionlib_msgs.msg import GoalStatus
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from std_srvs.srv import Empty, EmptyResponse
 
 
 # ── State identifiers ─────────────────────────────────────────────────────────
@@ -89,6 +91,14 @@ class ContactProbeManager:
         # ── State ─────────────────────────────────────────────────────────────
         self._state = NORMAL_NAV
         self._state_enter_time = rospy.Time.now()
+
+        # ── Runtime diagnostics (loop rate / wrench latency) ────────────────────
+        # Consumed by haptiquad_nav_eval's trial_logger.py, but standalone-useful
+        # (view with rqt_runtime_monitor or `rostopic echo /diagnostics`).
+        self._update_period_target = 0.1   # must match the Timer period below
+        self._loop_period_buf   = collections.deque(maxlen=50)
+        self._last_update_wall  = None
+        self._wrench_latency_buf = collections.deque(maxlen=50)
 
         # ── Wrench filtering ─────────────────────────────────────────────────
         self._wrench_buf = {
@@ -151,9 +161,36 @@ class ContactProbeManager:
             '/haptiquad_nav/solid_obstacles', PointCloud2, queue_size=1, latch=True)
         self._movable_pub = rospy.Publisher(
             '/haptiquad_nav/movable_obstacles', PointCloud2, queue_size=1, latch=True)
+        # Current state-machine state, published on every transition. Consumed by
+        # haptiquad_nav_eval to bound each trial's time-series recording window
+        # and to derive the classification outcome (BACKING_UP visited => SOLID,
+        # CLASSIFYING->NORMAL_NAV directly => MOVABLE) without re-implementing
+        # the state machine's own logic.
+        self._state_pub = rospy.Publisher(
+            '/haptiquad_nav/state', String, queue_size=1, latch=True)
+        self._diag_pub = rospy.Publisher(
+            '/diagnostics', DiagnosticArray, queue_size=1)
+        # Safety-margin telemetry: distance to nearest confirmed-unknown
+        # obstacle, forward and rear sector. Not used by this node's own
+        # control logic (that's still self._nearest_obs / self._nearest_rear_obs
+        # directly) -- this is purely so an external observer (trial_logger.py)
+        # can log how close the robot actually got, without duplicating the
+        # lidar-processing logic in _cloud_cb.
+        self._nearest_obs_pub = rospy.Publisher(
+            '/haptiquad_nav/nearest_obstacle_distance', Float64, queue_size=1)
+        self._nearest_rear_obs_pub = rospy.Publisher(
+            '/haptiquad_nav/nearest_rear_obstacle_distance', Float64, queue_size=1)
+
+        # Reset hook for external harnesses (e.g. haptiquad_nav_eval) that
+        # reset the Gazebo world / robot pose between trials. Without this,
+        # _solid_obstacles / _movable_obstacles / the permanent costmap marks
+        # accumulate for the node's entire lifetime and silently leak into
+        # the next trial after a world reset.
+        self._reset_srv = rospy.Service('~reset', Empty, self._reset_cb)
 
         # Publish uncapped speed at startup
         self._set_speed_limit(float('inf'))
+        self._state_pub.publish(String(data=self._state))
 
         # ── move_base action client ───────────────────────────────────────────
         self._mb_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
@@ -170,9 +207,10 @@ class ContactProbeManager:
         rospy.Subscriber('/move_base_simple/goal', PoseStamped,           self._simple_goal_cb, queue_size=1)
 
         # ── Main loop ─────────────────────────────────────────────────────────
-        rospy.Timer(rospy.Duration(0.1), self._update)
+        rospy.Timer(rospy.Duration(self._update_period_target), self._update)
         rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_obstacles())
         rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_movable_obstacles())
+        rospy.Timer(rospy.Duration(1.0), self._publish_diagnostics)
 
         rospy.loginfo(
             '[ContactProbe] Started. cloud h=[%.2f,%.2f] r=[%.2f,%.2f] sector=±%.0f°',
@@ -198,6 +236,10 @@ class ContactProbeManager:
         self._wrench_buf['tx'].append(w.torque.x)
         self._wrench_buf['ty'].append(w.torque.y)
         self._wrench_buf['tz'].append(w.torque.z)
+
+        latency = (rospy.Time.now() - msg.header.stamp).to_sec()
+        if 0.0 <= latency < 5.0:   # discard clock-skew/sim-time-jump outliers
+            self._wrench_latency_buf.append(latency)
 
     def _cloud_cb(self, msg):
         """Find nearest obstacle in forward ±sector cone from 3D pointcloud."""
@@ -386,13 +428,12 @@ class ContactProbeManager:
     # ── Solid obstacle cloud ──────────────────────────────────────────────────
 
     def _publish_obstacles(self):
-        if not self._solid_pts:
-            return
+        # No early-return-on-empty here: publishing a zero-point cloud is how a
+        # reset (see _reset_cb) clears the latched topic for late subscribers
+        # (e.g. the global costmap's obstacle_layer after a fresh subscribe).
         pts = []
         for obstacle_pts in self._solid_pts:
             pts.extend(obstacle_pts)
-        if not pts:
-            return
 
         cloud = PointCloud2()
         cloud.header.stamp = rospy.Time.now()
@@ -412,8 +453,7 @@ class ContactProbeManager:
         self._obstacles_pub.publish(cloud)
 
     def _publish_movable_obstacles(self):
-        if not self._movable_obstacles:
-            return
+        # Same no-early-return rule as _publish_obstacles -- see comment there.
         pts = [(float(x), float(y), 0.0) for x, y, _ in self._movable_obstacles]
         cloud = PointCloud2()
         cloud.header.stamp = rospy.Time.now()
@@ -555,6 +595,7 @@ class ContactProbeManager:
                       prev_state, new_state, self._nearest_obs)
         self._state = new_state
         self._state_enter_time = rospy.Time.now()
+        self._state_pub.publish(String(data=new_state))
 
         if new_state == NORMAL_NAV:
             self._set_speed_limit(float('inf'))
@@ -594,9 +635,80 @@ class ContactProbeManager:
     def _elapsed(self):
         return (rospy.Time.now() - self._state_enter_time).to_sec()
 
+    # ── External reset hook ──────────────────────────────────────────────────
+
+    def _reset_cb(self, _req):
+        """Clear accumulated obstacle memory and return to NORMAL_NAV.
+
+        Does NOT clear the move_base costmaps or Gazebo/estimator state --
+        callers (e.g. haptiquad_nav_eval's orchestrator) are expected to
+        also call move_base's own /move_base/clear_costmaps and whatever
+        Gazebo/state-estimator reset sequence they use, in whichever order
+        makes sense for their world reset. This only resets what this node
+        itself owns.
+        """
+        rospy.loginfo('[ContactProbe] Reset requested -- clearing obstacle memory and state.')
+        self._mb_client.cancel_all_goals()
+        self._solid_obstacles = []
+        self._solid_pts = []
+        self._movable_obstacles = []
+        self._wrench_above_since = None
+        self._goal_needs_resend = False
+        self._last_goal = None
+        self._backup_cooldown_until = rospy.Time(0)
+        self._contact_point = None
+        self._state = NORMAL_NAV
+        self._state_enter_time = rospy.Time.now()
+        self._set_speed_limit(float('inf'))
+        self._state_pub.publish(String(data=NORMAL_NAV))
+        self._publish_obstacles()          # republish now-empty cloud -- clears the latch
+        self._publish_movable_obstacles()  # same
+        return EmptyResponse()
+
+    # ── Diagnostics ────────────────────────────────────────────────────────────
+
+    def _publish_diagnostics(self, _event):
+        if self._loop_period_buf:
+            mean_period = sum(self._loop_period_buf) / len(self._loop_period_buf)
+            loop_rate = 1.0 / mean_period if mean_period > 0 else 0.0
+        else:
+            loop_rate = 0.0
+        if self._wrench_latency_buf:
+            latency_ms = 1000.0 * sum(self._wrench_latency_buf) / len(self._wrench_latency_buf)
+        else:
+            latency_ms = 0.0
+
+        status = DiagnosticStatus()
+        status.name = 'contact_probe_manager'
+        status.level = DiagnosticStatus.OK
+        status.message = 'running'
+        status.values = [
+            KeyValue(key='loop_rate_hz',        value='%.2f' % loop_rate),
+            KeyValue(key='loop_rate_target_hz', value='%.2f' % (1.0 / self._update_period_target)),
+            KeyValue(key='wrench_latency_ms',   value='%.2f' % latency_ms),
+        ]
+        arr = DiagnosticArray()
+        arr.header.stamp = rospy.Time.now()
+        arr.status = [status]
+        self._diag_pub.publish(arr)
+
     # ── Main update loop ──────────────────────────────────────────────────────
 
     def _update(self, _event):
+        now = rospy.Time.now()
+        if self._last_update_wall is not None:
+            self._loop_period_buf.append((now - self._last_update_wall).to_sec())
+        self._last_update_wall = now
+
+        # Published at the fixed 10Hz update rate rather than threaded through
+        # _cloud_cb's several early-return branches -- simpler, and a safety
+        # margin log doesn't need full lidar rate. Consumed by
+        # haptiquad_nav_eval's trial_logger.py to track minimum clearance
+        # during BACKING_UP (the safety-critical phase: is the robot getting
+        # dangerously close to an unknown rear obstacle while reversing).
+        self._nearest_obs_pub.publish(Float64(data=self._nearest_obs))
+        self._nearest_rear_obs_pub.publish(Float64(data=self._nearest_rear_obs))
+
         state = self._state
 
         if state == NORMAL_NAV:

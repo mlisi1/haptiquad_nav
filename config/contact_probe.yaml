@@ -66,7 +66,7 @@ classify_time: 1.5              # [s] forward push duration during classificatio
 # backup_clearance = robot_radius + inflation_radius + backup_extra_margin
 #   = 0.55 + 0.80 + 0.25 = 1.60 m
 # This guarantees the robot centre is outside the inflation lethal zone
-# before the user goal is re-sent (NavFnROS refuses to plan from lethal cells).
+# before the user goal is re-sent (the global planner refuses to plan from lethal cells).
 robot_radius: 0.55              # [m] must match costmap_common.yaml robot_radius
 inflation_radius: 0.80          # [m] must match costmap_common.yaml inflation_radius
 backup_extra_margin: 0.25       # [m] clearance beyond the inflation boundary

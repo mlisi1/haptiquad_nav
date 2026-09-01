@@ -13,11 +13,11 @@ static_map: false
 transform_tolerance: 0.5
 
 # ── Layers ───────────────────────────────────────────────────────
-# NO obstacle_layer here. The contact_probe_manager reads /scan_obstacles
-# directly for state transitions. If the local costmap also marks boxes as
-# lethal, TrajectoryPlannerROS rejects all forward trajectories at full
-# sim speed (0.4 m/s × 1.5 s = 0.6 m) and the robot never reaches
-# contact — move_base triggers recovery before any probing can happen.
+# NO obstacle_layer here. The contact_probe_manager reads the raw 3D lidar
+# PointCloud2 (/lidar/point_cloud) directly for state transitions — there is
+# no LaserScan intermediate. If the local costmap also marked boxes as
+# lethal, HaptiQuadNavPlanner would have to reject trajectories toward them
+# before contact_probe_manager ever reached SLOW_APPROACH.
 # The local costmap is intentionally all-free: the local planner always
 # drives toward the goal; the contact_probe_manager gates the velocity.
 plugins:
