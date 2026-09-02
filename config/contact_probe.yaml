@@ -2,17 +2,27 @@
 # Parameters for the contact_probe_manager state machine node.
 
 # ── Wrench thresholds ─────────────────────────────────────────────
-# Forces in [N], torques in [Nm]
-# Contact is confirmed solid if ANY component exceeds its threshold.
+# Forces in [N]. Only fx/fy are used, for both contact detection AND
+# force-mode classification -- fz and the torque axes (tx/ty/tz) are
+# dominated by walking-gait dynamics rather than genuine object contact
+# (ANYmal's vertical/roll/pitch base wrench swings well past what a light
+# contact produces just from normal walking). Including them caused both
+# false CONTACT_PROBE triggers from gait noise and a SOLID bias in
+# force-mode classification (the noisy fz component swamped the
+# w_now/w_init drop ratio). Contact is confirmed solid if fx OR fy
+# exceeds its threshold.
 wrench_threshold:
-  fx: 150.0          # forward force — primary contact signal
-                    # (high value for testing solid-cube-only detection; lower to
-                    # ~10–15 N for light-cube detection above gait noise ~5-8 N)
-  fy: 150.0
-  fz: 30.0          # vertical — usually terrain, be conservative
-  tx: 3.0
-  ty: 3.0
-  tz: 2.0
+  # Lowered from 20N: test_sweep_force_6 showed 1kg objects (all mu tested)
+  # visually moving but never registering CONTACT_PROBE->CLASSIFYING at all
+  # (NO_CONTACT) -- fx/fy never sustained above 20N for the full
+  # contact_hold_time even though contact clearly happened. 12N sits in the
+  # ~10-15N range this comment already called out, above the ~5-8N gait
+  # noise floor. Watch for the same NO_CONTACT pattern reappearing at very
+  # low mass/mu combos -- if it does, contact_hold_time (not just this
+  # threshold) may need shortening too, since a very light/low-friction
+  # object can accelerate away before 1.0s of sustained force accumulates.
+  fx: 12.0          # forward force — primary contact signal
+  fy: 12.0
 
 # Averaging window for wrench (reduces noise spikes)
 # ANYmal gait ≈ 2 Hz; wrench publishes at ~400 Hz → 200 samples ≈ one gait cycle.
@@ -23,7 +33,7 @@ wrench_filter_window: 50        # samples
 # ── Speed profiles ────────────────────────────────────────────────
 normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
 slow_approach_speed: 0.20       # [m/s] absolute, in SLOW_APPROACH state
-probe_speed: 0.25              # [m/s] absolute, in CONTACT_PROBE state
+probe_speed: 0.3              # [m/s] absolute, in CONTACT_PROBE state
                                # 0.1 m/s was too slow to push 5 kg / mu=0.05 boxes (~2.5 N friction)
 
 # ── Distance triggers ─────────────────────────────────────────────
@@ -54,11 +64,53 @@ mark_radius: 0.15                # [m] radius used by the provisional-ring fallb
 # Set to the largest obstacle depth you expect to encounter (m).
 obstacle_assumed_depth: 0.5     # [m] test-world cubes are 0.5 m deep
 
+# Radius (m) around a confirmed solid's contact point within which
+# _refine_last_solid() collects lidar points to measure the front face width.
+# Must exceed half the widest obstacle's lateral extent + margin, or a long
+# obstacle's mark will be narrower than its true footprint. Sized for the
+# ~0.5m test-world cubes by default; haptiquad_nav_eval's timing sweep
+# overrides this live per-trial via ~solid_refine_capture_radius_override for
+# its lateral-length sweep (see haptiquad_nav_eval/config/timing_sweep.yaml).
+solid_refine_capture_radius: 0.75   # [m]
+
 # ── Timing ────────────────────────────────────────────────────────
 probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up
                                 # Suspended once wrench exceeds threshold.
 contact_hold_time: 1.0          # [s] wrench must exceed threshold for this long
 classify_time: 1.5              # [s] forward push duration during classification
+
+# ── Classification criterion (ablation toggle) ─────────────────────
+# Which signal decides MOVABLE vs SOLID once the classify_time window closes.
+# Both metrics are always computed and logged regardless of mode -- only the
+# selected one drives the decision. Override via navigation.launch's
+# classification_mode arg for a single run; the value here is the default.
+#   force        : (default) MOVABLE iff the settled forward-push force stays
+#                  below classification_force_threshold_n. Chosen over a
+#                  relative-drop criterion because a continuously-pushed
+#                  sliding object exerts a roughly CONSTANT force under
+#                  Coulomb friction (~mu*m*g) -- it doesn't decay over time,
+#                  so "did force drop" can't tell steady sliding apart from
+#                  genuinely stuck (confirmed empirically: test_sweep_force_5
+#                  classified 28/32 SOLID, 0/32 MOVABLE using the old
+#                  relative-drop criterion across the whole mass/mu sweep).
+#   displacement : MOVABLE iff the base kept translating forward through the
+#                  object during classify_time (kinematic criterion).
+classification_mode: force
+# 'force' mode only. Settled-force sampling starts this many seconds into
+# CLASSIFYING (skips the initial contact transient / static-friction breakaway).
+classification_force_settle_time: 0.5
+# 'force' mode only. MOVABLE iff the mean settled forward force stays below
+# this. Empirically derived (see FORCE_SATURATION_THRESHOLD.md at the repo
+# root) -- not an a priori fraction of robot weight. For obstacles beyond the
+# robot's push capability, the settled force saturates at a mass/friction-
+# independent ~121-157N band (the robot's own actuation/gait limit bouncing
+# against a rigid constraint, not a measurement of the obstacle), while
+# genuinely sliding obstacles stay at 18-85N -- a clean, empty gap in
+# between (test_sweep_force_10, m in [5,70]kg, mu in [0.1,0.8]). 100N sits
+# in that gap with margin on both sides. Re-derive if probe_speed, gait, or
+# the robot model changes -- the saturation ceiling is a property of those,
+# not a universal constant.
+classification_force_threshold_n: 100.0
 
 # ── Back-up after SOLID detection ─────────────────────────────────
 # After classifying an obstacle as SOLID, the robot reverses briefly so
@@ -74,9 +126,9 @@ backup_extra_margin: 0.25       # [m] clearance beyond the inflation boundary
 backup_min_clearance: 0.60      # [m] UNKNOWN-obstacle-only rear safety stop.
                                 # Classified solids are excluded from this check.
                                 # Must be > robot_radius (0.55 m).
-backup_speed: 0.20              # [m/s] reverse speed during BACKING_UP state
+backup_speed: 0.30              # [m/s] reverse speed during BACKING_UP state
 
-backup_time: 10.0               # [s] fallback maximum backup duration.
+backup_time: 5.0               # [s] fallback maximum backup duration.
 
 # After backup completes, suppress SLOW_APPROACH for this many seconds so the
 # robot can begin moving along the replanned path before obstacle detection

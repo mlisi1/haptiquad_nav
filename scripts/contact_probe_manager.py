@@ -25,12 +25,12 @@ import actionlib
 
 from std_msgs.msg import Float64, String
 from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
-                                PoseWithCovarianceStamped)
+                                PoseWithCovarianceStamped, PolygonStamped)
 from sensor_msgs.msg import PointCloud2, PointField
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from actionlib_msgs.msg import GoalStatus
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from std_srvs.srv import Empty, EmptyResponse
+from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
 
 
 # ── State identifiers ─────────────────────────────────────────────────────────
@@ -45,48 +45,96 @@ class ContactProbeManager:
 
     def __init__(self):
         # ── Parameters ────────────────────────────────────────────────────────
-        self._thr_fx  = rospy.get_param('wrench_threshold/fx', 15.0)
-        self._thr_fy  = rospy.get_param('wrench_threshold/fy', 10.0)
-        self._thr_fz  = rospy.get_param('wrench_threshold/fz', 30.0)
-        self._thr_tx  = rospy.get_param('wrench_threshold/tx', 3.0)
-        self._thr_ty  = rospy.get_param('wrench_threshold/ty', 3.0)
-        self._thr_tz  = rospy.get_param('wrench_threshold/tz', 2.0)
+        # fz/tx/ty/tz are deliberately NOT used for contact detection: fz and the
+        # torque axes are dominated by walking-gait dynamics (see contact_probe.yaml),
+        # not genuine object contact, and using them caused both false CONTACT_PROBE
+        # triggers and a SOLID bias in force-mode classification. Detection and
+        # classification both rely on fx/fy only.
+        self._thr_fx  = rospy.get_param('~wrench_threshold/fx', 15.0)
+        self._thr_fy  = rospy.get_param('~wrench_threshold/fy', 10.0)
 
-        self._filter_win   = rospy.get_param('wrench_filter_window', 10)
-        self._slow_speed   = rospy.get_param('slow_approach_speed', 0.20)
-        self._probe_speed  = rospy.get_param('probe_speed', 0.05)
-        self._slow_dist    = rospy.get_param('slow_approach_distance', 1.0)
-        self._probe_dist   = rospy.get_param('probe_distance', 0.65)
-        self._probe_timeout = rospy.get_param('probe_timeout', 20.0)
-        self._hold_time    = rospy.get_param('contact_hold_time', 1.0)
-        self._mark_radius  = rospy.get_param('mark_radius', 0.05)
-        self._classify_time = rospy.get_param('classify_time', 1.5)
-        self._backup_speed  = rospy.get_param('backup_speed', 0.20)
-        _robot_radius      = rospy.get_param('robot_radius', 0.55)
-        _inflation_radius  = rospy.get_param('inflation_radius', 0.80)
-        _backup_margin     = rospy.get_param('backup_extra_margin', 0.25)
+        self._filter_win   = rospy.get_param('~wrench_filter_window', 10)
+        self._slow_speed   = rospy.get_param('~slow_approach_speed', 0.20)
+        self._probe_speed  = rospy.get_param('~probe_speed', 0.05)
+        self._slow_dist    = rospy.get_param('~slow_approach_distance', 1.0)
+        self._probe_dist   = rospy.get_param('~probe_distance', 0.65)
+        self._probe_timeout = rospy.get_param('~probe_timeout', 20.0)
+        self._hold_time    = rospy.get_param('~contact_hold_time', 1.0)
+        self._mark_radius  = rospy.get_param('~mark_radius', 0.05)
+        self._classify_time = rospy.get_param('~classify_time', 1.5)
+
+        # ── Classification criterion (ablation toggle) ──────────────────────────
+        # 'force' (default): MOVABLE iff the settled forward-push force during the
+        #   classify window stays below classification_force_threshold_n. An earlier
+        #   relative-drop criterion (is w_now < 0.5*w_init) was replaced: under
+        #   Coulomb friction a continuously-pushed sliding object exerts a roughly
+        #   CONSTANT resisting force (~mu*m*g), it doesn't decay over time, so a
+        #   relative-drop test can't distinguish "sliding at steady kinetic friction"
+        #   from "genuinely stuck" -- confirmed empirically (test_sweep_force_5:
+        #   28/32 trials SOLID, 0/32 MOVABLE across the whole mass/mu sweep). An
+        #   absolute force ceiling is the physically meaningful criterion instead.
+        # 'displacement': MOVABLE iff the base keeps translating forward through
+        #   the object during the classify window (kinematic criterion).
+        self._classification_mode = rospy.get_param('~classification_mode', 'force')
+        if self._classification_mode not in ('displacement', 'force'):
+            rospy.logwarn(
+                "[ContactProbe] Unknown classification_mode '%s' -- falling back to "
+                "'force'. Valid values: 'displacement', 'force'.",
+                self._classification_mode)
+            self._classification_mode = 'force'
+        # How long into CLASSIFYING to wait before sampling starts, so the initial
+        # contact transient (impact spike / static-friction breakaway) isn't
+        # averaged into the "settled" reading.
+        self._force_settle_time = rospy.get_param('~classification_force_settle_time', 0.5)
+        # MOVABLE iff the mean settled forward force stays below this. Default is
+        # push_capability_mass_fraction(0.25) * robot_mass_kg(52.13) * g -- the same
+        # "robot could still move ~25% of its own mass at this speed" definition
+        # already used as offline ground truth in plotting.py's default_config().
+        # Treat this as a starting point: refine using the sweep's own
+        # force_vs_static_friction / confusion-matrix plots once you have data.
+        self._force_threshold_n = rospy.get_param('~classification_force_threshold_n', 127.8)
+        rospy.loginfo('[ContactProbe] classification_mode=%s (force_threshold=%.1fN, settle=%.1fs)',
+                      self._classification_mode, self._force_threshold_n, self._force_settle_time)
+        self._backup_speed  = rospy.get_param('~backup_speed', 0.20)
+        _robot_radius      = rospy.get_param('~robot_radius', 0.55)
+        _inflation_radius  = rospy.get_param('~inflation_radius', 0.80)
+        _backup_margin     = rospy.get_param('~backup_extra_margin', 0.25)
         self._backup_clearance = _robot_radius + _inflation_radius + _backup_margin
-        self._backup_min_clear = rospy.get_param('backup_min_clearance', 0.60)
-        self._backup_time   = rospy.get_param('backup_time', 20.0)
-        self._post_backup_cooldown = rospy.get_param('post_backup_cooldown', 3.0)
-        self._obstacle_depth = rospy.get_param('obstacle_assumed_depth', 0.5)
+        self._backup_min_clear = rospy.get_param('~backup_min_clearance', 0.60)
+        self._backup_time   = rospy.get_param('~backup_time', 20.0)
+        self._post_backup_cooldown = rospy.get_param('~post_backup_cooldown', 3.0)
+        self._obstacle_depth = rospy.get_param('~obstacle_assumed_depth', 0.5)
 
-        self._probe_push_depth = rospy.get_param('probe_push_depth', 0.5)
-        _probe_heading_deg     = rospy.get_param('probe_heading_max_deg', 25.0)
+        self._probe_push_depth = rospy.get_param('~probe_push_depth', 0.5)
+        _probe_heading_deg     = rospy.get_param('~probe_heading_max_deg', 25.0)
         self._probe_heading_thr = math.radians(_probe_heading_deg)
 
         # ── 3D cloud parameters ────────────────────────────────────────────────
-        self._cloud_h_min  = rospy.get_param('cloud_height_min', -0.10)
-        self._cloud_h_max  = rospy.get_param('cloud_height_max', 1.20)
-        self._cloud_r_min  = rospy.get_param('cloud_range_min', 0.55)
-        self._cloud_r_max  = rospy.get_param('cloud_range_max', 8.0)
-        self._fwd_sector   = math.radians(rospy.get_param('forward_sector_deg', 45.0))
-        solid_excl         = rospy.get_param('solid_excl_radius', 0.7)
+        self._cloud_h_min  = rospy.get_param('~cloud_height_min', -0.10)
+        self._cloud_h_max  = rospy.get_param('~cloud_height_max', 1.20)
+        self._cloud_r_min  = rospy.get_param('~cloud_range_min', 0.55)
+        self._cloud_r_max  = rospy.get_param('~cloud_range_max', 8.0)
+        self._fwd_sector   = math.radians(rospy.get_param('~forward_sector_deg', 45.0))
+        solid_excl         = rospy.get_param('~solid_excl_radius', 0.7)
         self._solid_excl_r2 = solid_excl ** 2
-        movable_excl        = rospy.get_param('movable_excl_radius', 1.5)
+        movable_excl        = rospy.get_param('~movable_excl_radius', 1.5)
         self._movable_excl_r2 = movable_excl ** 2
-        self._movable_track_r    = rospy.get_param('movable_track_radius', 0.5)
-        self._movable_track_min  = rospy.get_param('movable_track_min_pts', 3)
+        self._movable_track_r    = rospy.get_param('~movable_track_radius', 0.5)
+        self._movable_track_min  = rospy.get_param('~movable_track_min_pts', 3)
+        # Radius (m) around a confirmed solid's contact point within which
+        # _refine_last_solid() collects lidar points to measure the face width.
+        # Was a hardcoded 0.75 -- promoted to a param so haptiquad_nav_eval's
+        # timing sweep can override it live (see the ~*_override subscribers
+        # below) for obstacles much longer than the ~0.5m test-world default.
+        self._refine_capture_r = rospy.get_param('~solid_refine_capture_radius', 0.75)
+
+        # ── Probing bypass (haptiquad_nav_eval timing-comparison harness only) ──
+        # Always True in normal operation and for the existing mass/mu sweep --
+        # only haptiquad_nav_eval's timing_sweep_orchestrator.py ever calls
+        # ~set_probing_enabled(False), to measure a "classical" (obstacle
+        # pre-known, no tactile probing) baseline against the same move_base
+        # stack. See _update()'s early-return and _set_probing_enabled_cb.
+        self._probing_enabled = True
 
         # ── State ─────────────────────────────────────────────────────────────
         self._state = NORMAL_NAV
@@ -126,7 +174,7 @@ class ContactProbeManager:
 
         # ── Classify bookkeeping ──────────────────────────────────────────────
         self._classify_start_pos        = None
-        self._classify_start_wrench_mag = None
+        self._classify_force_samples    = []   # _wrench_forward_mag() samples, post-settle
         self._contact_point             = None   # (x, y, z) in map frame
         self._probe_entry_yaw           = 0.0
         self._probe_obs_dist            = 0.0    # measured obstacle dist at CONTACT_PROBE entry
@@ -187,6 +235,31 @@ class ContactProbeManager:
         # accumulate for the node's entire lifetime and silently leak into
         # the next trial after a world reset.
         self._reset_srv = rospy.Service('~reset', Empty, self._reset_cb)
+
+        # Opt-in bypass switch + live radius overrides for haptiquad_nav_eval's
+        # timing_sweep_orchestrator.py. Neither is ever touched by the existing
+        # mass/mu sweep (sweep_orchestrator.py/trial_logger.py) -- the two
+        # sweeps run against this same long-lived node but stay behaviorally
+        # independent as long as nothing publishes/calls these.
+        self._set_probing_srv = rospy.Service(
+            '~set_probing_enabled', SetBool, self._set_probing_enabled_cb)
+        rospy.Subscriber('~solid_excl_radius_override', Float64,
+                         self._solid_excl_override_cb, queue_size=1)
+        rospy.Subscriber('~movable_excl_radius_override', Float64,
+                         self._movable_excl_override_cb, queue_size=1)
+        rospy.Subscriber('~solid_refine_capture_radius_override', Float64,
+                         self._refine_capture_override_cb, queue_size=1)
+        # "Classical" (a priori known obstacle) baseline for
+        # haptiquad_nav_eval's timing sweep: injects a ground-truth
+        # rectangle straight into the global costmap through the SAME
+        # _solid_obstacles/_solid_pts path a real probe uses, without ever
+        # running CONTACT_PROBE/CLASSIFYING. ~set_probing_enabled alone is
+        # NOT enough to produce a valid "classical" trial -- it only stops
+        # the state machine from slowing down/probing, it does nothing to
+        # tell the GLOBAL PLANNER the obstacle exists, so without this the
+        # robot walks straight through it.
+        rospy.Subscriber('~inject_known_solid', PolygonStamped,
+                         self._inject_known_solid_cb, queue_size=1)
 
         # Publish uncapped speed at startup
         self._set_speed_limit(float('inf'))
@@ -328,14 +401,29 @@ class ContactProbeManager:
             self._last_all_pts_map = None
 
         # Refine stored movable obstacle positions from the current full-360° scan.
-        # Only updates when the obstacle is outside the lidar blind spot so that
-        # erroneous updates don't happen while the robot is actively pushing it.
+        # Only updates via lidar centroid when the obstacle is outside the blind
+        # spot. While inside the blind spot (presumed still in contact, being
+        # pushed), dead-reckon the tracked position to stay directly ahead of
+        # the robot instead of leaving it frozen at the stale classification-time
+        # seed -- without this, continued pushing after classification (e.g.
+        # toward a goal well past the obstacle) carries the true object position
+        # outside movable_excl_radius of the frozen seed, so the object
+        # re-emerges as a "new" lidar obstacle mid-push and re-triggers
+        # SLOW_APPROACH/CONTACT_PROBE against the very object already
+        # classified MOVABLE (sending a fresh probe goal into it).
         if self._movable_obstacles and self._last_all_pts_map is not None:
             pts_map = self._last_all_pts_map
             changed = False
+            cy_h = math.cos(self._robot_yaw)
+            sy_h = math.sin(self._robot_yaw)
             for i, (mox, moy, moz) in enumerate(self._movable_obstacles):
                 if math.hypot(mox - self._robot_x, moy - self._robot_y) < self._cloud_r_min:
-                    continue  # in blind spot
+                    new_mox = self._robot_x + self._cloud_r_min * cy_h
+                    new_moy = self._robot_y + self._cloud_r_min * sy_h
+                    if math.hypot(new_mox - mox, new_moy - moy) > 0.01:
+                        self._movable_obstacles[i] = (new_mox, new_moy, moz)
+                        changed = True
+                    continue  # in blind spot -- dead-reckoned above, not lidar-refined
                 known = np.array([mox, moy])
                 d2 = np.linalg.norm(pts_map - known[np.newaxis, :], axis=1)
                 near = pts_map[d2 <= self._movable_track_r]
@@ -408,16 +496,25 @@ class ContactProbeManager:
         return sum(buf) / len(buf) if buf else 0.0
 
     def _wrench_above_threshold(self):
+        # fx/fy only -- see the wrench_threshold param comment: fz and the torque
+        # axes are dominated by walking-gait dynamics, not genuine contact, and
+        # including them caused both false CONTACT_PROBE triggers and a SOLID bias
+        # in force-mode classification.
         return (abs(self._avg('fx')) > self._thr_fx or
-                abs(self._avg('fy')) > self._thr_fy or
-                abs(self._avg('fz')) > self._thr_fz or
-                abs(self._avg('tx')) > self._thr_tx or
-                abs(self._avg('ty')) > self._thr_ty or
-                abs(self._avg('tz')) > self._thr_tz)
+                abs(self._avg('fy')) > self._thr_fy)
 
-    def _wrench_magnitude(self):
-        return math.sqrt(self._avg('fx')**2 + self._avg('fy')**2 +
-                         self._avg('fz')**2)
+    def _wrench_forward_mag(self):
+        """|Horizontal force along probe_entry_yaw| -- used for force-mode
+        classification. fz is deliberately excluded: it's dominated by
+        walking-gait bounce (see wrench_threshold's own comment) and oscillates
+        independently of whether the object actually moved, which would swamp
+        the settled-force reading force-mode classification is based on.
+        Projecting onto the approach heading (rather than sqrt(fx^2+fy^2)) also
+        drops the off-axis fy component, mirroring how displacement mode already
+        projects base motion onto the same axis for `forward`.
+        """
+        return abs(self._avg('fx') * math.cos(self._probe_entry_yaw) +
+                   self._avg('fy') * math.sin(self._probe_entry_yaw))
 
     # ── Speed limit ───────────────────────────────────────────────────────────
 
@@ -490,7 +587,7 @@ class ContactProbeManager:
         if pts_map is not None and pts_map.shape[0] > 0:
             known_pos = np.array([cx_known, cy_known])
             dists = np.linalg.norm(pts_map - known_pos[np.newaxis, :], axis=1)
-            near = pts_map[dists <= 0.75]
+            near = pts_map[dists <= self._refine_capture_r]
 
         if near.shape[0] > 0:
             # Orthonormal basis aligned to the approach direction.
@@ -624,8 +721,8 @@ class ContactProbeManager:
             self._set_speed_limit(self._probe_speed)
 
         elif new_state == CLASSIFYING:
-            self._classify_start_pos        = (self._robot_x, self._robot_y)
-            self._classify_start_wrench_mag = self._wrench_magnitude()
+            self._classify_start_pos     = (self._robot_x, self._robot_y)
+            self._classify_force_samples = []
             # Probe goal stays active; speed_limit stays at probe_speed.
 
         elif new_state == BACKING_UP:
@@ -665,6 +762,73 @@ class ContactProbeManager:
         self._publish_movable_obstacles()  # same
         return EmptyResponse()
 
+    def _set_probing_enabled_cb(self, req):
+        """haptiquad_nav_eval's timing_sweep_orchestrator.py only -- disables
+        the entire contact-probe state machine so a "classical" trial measures
+        plain move_base navigation (the obstacle is never slowed for/probed/
+        pushed). Forces a clean NORMAL_NAV/full-speed state immediately on
+        disable so bypass takes effect before the orchestrator's next goal is
+        sent, regardless of what state the machine happened to be in."""
+        self._probing_enabled = req.data
+        if not req.data:
+            self._mb_client.cancel_all_goals()
+            self._state = NORMAL_NAV
+            self._state_enter_time = rospy.Time.now()
+            self._set_speed_limit(float('inf'))
+            self._state_pub.publish(String(data=NORMAL_NAV))
+            self._goal_needs_resend = False
+        rospy.loginfo('[ContactProbe] probing_enabled=%s', req.data)
+        return SetBoolResponse(success=True, message='probing_enabled=%s' % req.data)
+
+    def _solid_excl_override_cb(self, msg):
+        self._solid_excl_r2 = msg.data ** 2
+
+    def _movable_excl_override_cb(self, msg):
+        self._movable_excl_r2 = msg.data ** 2
+
+    def _refine_capture_override_cb(self, msg):
+        self._refine_capture_r = msg.data
+
+    def _inject_known_solid_cb(self, msg):
+        """haptiquad_nav_eval's timing_sweep_orchestrator.py only (classical
+        arm) -- injects a KNOWN ground-truth rectangle (any orientation, map
+        frame) directly into _solid_obstacles/_solid_pts, exactly like a
+        real probe's _refine_last_solid() would after classifying SOLID and
+        backing up, so the global costmap knows about it a priori and the
+        global planner routes around it from the very first plan -- with
+        zero CONTACT_PROBE/CLASSIFYING/BACKING_UP ever run. Dense grid built
+        the same way _refine_last_solid() builds one, just from the given
+        corners instead of a lidar-measured face."""
+        pts = np.array([[p.x, p.y] for p in msg.polygon.points], dtype=float)
+        if pts.shape[0] < 3:
+            rospy.logwarn('[ContactProbe] inject_known_solid: need >=3 polygon '
+                          'points, got %d -- ignoring.', pts.shape[0])
+            return
+
+        center = pts.mean(axis=0)
+        edge = pts[1] - pts[0]
+        face_ang = math.atan2(edge[1], edge[0])
+        fx, fy = math.cos(face_ang), math.sin(face_ang)
+        px, py = -fy, fx
+        proj_face = (pts[:, 0] - center[0]) * fx + (pts[:, 1] - center[1]) * fy
+        proj_side = (pts[:, 0] - center[0]) * px + (pts[:, 1] - center[1]) * py
+        face_lo, face_hi = float(proj_face.min()), float(proj_face.max())
+        side_lo, side_hi = float(proj_side.min()), float(proj_side.max())
+
+        step = 0.05
+        face_vals = np.arange(face_lo, face_hi + step * 0.5, step)
+        side_vals = np.arange(side_lo, side_hi + step * 0.5, step)
+        grid_pts = [(float(center[0] + fv * fx + sv * px),
+                    float(center[1] + fv * fy + sv * py), 0.0)
+                   for fv in face_vals for sv in side_vals]
+
+        self._solid_obstacles.append((float(center[0]), float(center[1]), 0.0))
+        self._solid_pts.append(grid_pts)
+        self._publish_obstacles()
+        rospy.loginfo('[ContactProbe] Injected known solid at (%.2f,%.2f) — %d pts '
+                      '(%.2fm × %.2fm)', center[0], center[1], len(grid_pts),
+                      face_hi - face_lo, side_hi - side_lo)
+
     # ── Diagnostics ────────────────────────────────────────────────────────────
 
     def _publish_diagnostics(self, _event):
@@ -699,6 +863,13 @@ class ContactProbeManager:
         if self._last_update_wall is not None:
             self._loop_period_buf.append((now - self._last_update_wall).to_sec())
         self._last_update_wall = now
+
+        if not self._probing_enabled:
+            # Bypass mode (haptiquad_nav_eval timing harness only, see
+            # _set_probing_enabled_cb) -- state is already pinned at
+            # NORMAL_NAV/speed_limit=inf from the moment it was disabled;
+            # skip the state machine and nearest-obstacle telemetry entirely.
+            return
 
         # Published at the fixed 10Hz update rate rather than threaded through
         # _cloud_cb's several early-return branches -- simpler, and a safety
@@ -779,23 +950,44 @@ class ContactProbeManager:
                 self._enter(NORMAL_NAV)
                 return
 
-            if self._elapsed() >= self._classify_time:
+            elapsed = self._elapsed()
+            # Sample the settled forward force every tick once past the settle
+            # window, so the end-of-window decision averages over the steady-state
+            # push rather than a single noisy instantaneous reading.
+            if elapsed >= self._force_settle_time:
+                self._classify_force_samples.append(self._wrench_forward_mag())
+
+            if elapsed >= self._classify_time:
                 dx = self._robot_x - self._classify_start_pos[0]
                 dy = self._robot_y - self._classify_start_pos[1]
                 forward = (dx * math.cos(self._probe_entry_yaw) +
                            dy * math.sin(self._probe_entry_yaw))
 
-                w_now  = self._wrench_magnitude()
-                w_init = self._classify_start_wrench_mag or 1.0
-                wrench_dropped    = w_now < 0.5 * w_init
+                if self._classify_force_samples:
+                    w_settled = sum(self._classify_force_samples) / len(self._classify_force_samples)
+                else:
+                    w_settled = self._wrench_forward_mag()   # settle_time >= classify_time edge case
                 movable_threshold = self._probe_speed * self._classify_time * 0.4
 
-                if forward > movable_threshold:
+                # Ablation toggle (classification_mode param): both metrics are
+                # always computed and logged so a run's classify_time samples one
+                # criterion while the other is still visible for offline comparison,
+                # but only the selected one drives the MOVABLE/SOLID decision.
+                if self._classification_mode == 'force':
+                    is_movable = w_settled < self._force_threshold_n
+                    decision_detail = 'force-mode: w_settled=%.1fN vs thr=%.1fN' % (
+                        w_settled, self._force_threshold_n)
+                else:
+                    is_movable = forward > movable_threshold
+                    decision_detail = 'displacement-mode: Δfwd=%.3fm vs %.3fm' % (
+                        forward, movable_threshold)
+
+                if is_movable:
                     rospy.loginfo(
-                        '[ContactProbe] MOVABLE at (%.2f, %.2f) — Δfwd=%.3fm > %.3fm '
-                        '[wrench_drop=%s w_now=%.1f w_init=%.1f]',
-                        self._contact_point[0], self._contact_point[1],
-                        forward, movable_threshold, wrench_dropped, w_now, w_init)
+                        '[ContactProbe] MOVABLE at (%.2f, %.2f) — %s '
+                        '[Δfwd=%.3fm thr=%.3fm w_settled=%.1fN thr=%.1fN]',
+                        self._contact_point[0], self._contact_point[1], decision_detail,
+                        forward, movable_threshold, w_settled, self._force_threshold_n)
                     # Seed at contact_point + measured push so the tracking
                     # radius covers the actual post-push position immediately.
                     pushed = (
@@ -804,13 +996,25 @@ class ContactProbeManager:
                         0.0)
                     self._movable_obstacles.append(pushed)
                     self._publish_movable_obstacles()
+                    # _nearest_obs still holds whatever _cloud_cb last computed
+                    # BEFORE this obstacle existed in _movable_obstacles (that
+                    # exclusion is only applied inside _cloud_cb itself, an
+                    # async callback independent of this 10Hz timer) -- almost
+                    # certainly very close, since the robot was just in
+                    # contact. Left alone, the very next _update() tick's
+                    # NORMAL_NAV branch can see that stale close reading and
+                    # re-enter SLOW_APPROACH against the object it just
+                    # classified MOVABLE, before the next fresh point cloud
+                    # arrives and correctly excludes it. Forcing it to inf
+                    # here closes that race instead of waiting on cloud timing.
+                    self._nearest_obs = float('inf')
                     self._enter(NORMAL_NAV)
                 else:
                     rospy.logwarn(
-                        '[ContactProbe] SOLID at (%.2f, %.2f) '
-                        '[Δfwd=%.3fm ≤ %.3fm, wrench_drop=%s]',
-                        self._contact_point[0], self._contact_point[1],
-                        forward, movable_threshold, wrench_dropped)
+                        '[ContactProbe] SOLID at (%.2f, %.2f) — %s '
+                        '[Δfwd=%.3fm thr=%.3fm w_settled=%.1fN thr=%.1fN]',
+                        self._contact_point[0], self._contact_point[1], decision_detail,
+                        forward, movable_threshold, w_settled, self._force_threshold_n)
                     self._solid_obstacles.append(self._contact_point)
                     # Placeholder — filled by _refine_last_solid() after backup.
                     # Delaying the costmap mark until after backup ensures the

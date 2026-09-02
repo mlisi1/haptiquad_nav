@@ -23,6 +23,12 @@
   <!-- set to false to suppress RViz -->
   <arg name="rviz"              default="false"/>
   <arg name="rviz_config"       default="$(find haptiquad_nav)/config/navigation.rviz"/>
+  <!-- MOVABLE/SOLID classification criterion (ablation toggle).
+       Leave blank (default) to use whatever contact_probe.yaml sets; pass
+       'displacement' or 'force' here only to override it for this launch
+       (e.g. `classification_mode:=force`).
+       See contact_probe.yaml's "Classification criterion" section. -->
+  <arg name="classification_mode" default=""/>
 
   <param name="/use_sim_time" value="$(arg use_sim_time)"/>
 
@@ -76,6 +82,8 @@
   <node name="contact_probe_manager" pkg="haptiquad_nav"
         type="contact_probe_manager.py" output="screen">
     <rosparam file="$(find haptiquad_nav)/config/contact_probe.yaml" command="load"/>
+    <param name="classification_mode" value="$(arg classification_mode)"
+           if="$(eval classification_mode != '')"/>
     <remap from="base_wrench"    to="$(arg wrench_topic)"/>
     <remap from="point_cloud_in" to="$(arg pointcloud_topic)"/>
   </node>
