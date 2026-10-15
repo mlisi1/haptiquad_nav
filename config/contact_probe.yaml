@@ -1,28 +1,41 @@
 # contact_probe.yaml
 # Parameters for the contact_probe_manager state machine node.
 
-# ── Wrench thresholds ─────────────────────────────────────────────
-# Forces in [N]. Only fx/fy are used, for both contact detection AND
-# force-mode classification -- fz and the torque axes (tx/ty/tz) are
-# dominated by walking-gait dynamics rather than genuine object contact
-# (ANYmal's vertical/roll/pitch base wrench swings well past what a light
-# contact produces just from normal walking). Including them caused both
-# false CONTACT_PROBE triggers from gait noise and a SOLID bias in
-# force-mode classification (the noisy fz component swamped the
-# w_now/w_init drop ratio). Contact is confirmed solid if fx OR fy
-# exceeds its threshold.
-wrench_threshold:
-  # Lowered from 20N: test_sweep_force_6 showed 1kg objects (all mu tested)
-  # visually moving but never registering CONTACT_PROBE->CLASSIFYING at all
-  # (NO_CONTACT) -- fx/fy never sustained above 20N for the full
-  # contact_hold_time even though contact clearly happened. 12N sits in the
-  # ~10-15N range this comment already called out, above the ~5-8N gait
-  # noise floor. Watch for the same NO_CONTACT pattern reappearing at very
-  # low mass/mu combos -- if it does, contact_hold_time (not just this
-  # threshold) may need shortening too, since a very light/low-friction
-  # object can accelerate away before 1.0s of sustained force accumulates.
-  fx: 12.0          # forward force — primary contact signal
-  fy: 12.0
+# ── Contact detection threshold ────────────────────────────────────
+# Forces in [N]. A SINGLE threshold on the force projected onto the
+# approach heading (fx, fy rotated into the direction the robot was facing
+# at CONTACT_PROBE entry -- see contact_probe_manager.py's
+# _wrench_forward_mag), not two independent per-axis thresholds. fz and
+# the torque axes (tx/ty/tz) are excluded entirely -- dominated by
+# walking-gait dynamics rather than genuine object contact (ANYmal's
+# vertical/roll/pitch base wrench swings well past what a light contact
+# produces just from normal walking). Including them caused both false
+# CONTACT_PROBE triggers from gait noise and a SOLID bias in force-mode
+# classification (the noisy fz component swamped the w_now/w_init drop
+# ratio).
+#
+# A single threshold on the projected magnitude is isotropic: the same
+# resultant force triggers detection regardless of approach heading. The
+# previous two-threshold (fx, fy independently) scheme was anisotropic --
+# at a 45 degree approach heading it required up to threshold*sqrt(2) of
+# resultant force to trigger (neither raw axis component alone reached the
+# threshold), while a 0/90 degree heading only needed the threshold itself.
+# All three haptiquad_nav_eval sweeps currently fix approach_angle at 0, so
+# this value carries over unchanged from the old fx/fy pair (both were
+# already equal at 12N) -- re-validate before trusting this default at any
+# other approach heading. 7N was briefly tried (test_timing_opt_5rep_8N);
+# every other recorded sweep ran at 12N, so 12N stays the reference value.
+#
+# Lowered from 20N: test_sweep_force_6 showed 1kg objects (all mu tested)
+# visually moving but never registering CONTACT_PROBE->CLASSIFYING at all
+# (NO_CONTACT) -- fx/fy never sustained above 20N for the full
+# contact_hold_time even though contact clearly happened. 12N sits in the
+# ~10-15N range this comment already called out, above the ~5-8N gait
+# noise floor. Watch for the same NO_CONTACT pattern reappearing at very
+# low mass/mu combos -- if it does, contact_hold_time (not just this
+# threshold) may need shortening too, since a very light/low-friction
+# object can accelerate away before 1.0s of sustained force accumulates.
+contact_force_threshold_n: 12.0
 
 # Averaging window for wrench (reduces noise spikes)
 # ANYmal gait ≈ 2 Hz; wrench publishes at ~400 Hz → 200 samples ≈ one gait cycle.
@@ -32,15 +45,15 @@ wrench_filter_window: 50        # samples
 
 # ── Speed profiles ────────────────────────────────────────────────
 normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
-slow_approach_speed: 0.20       # [m/s] absolute, in SLOW_APPROACH state
+slow_approach_speed: 0.30       # [m/s] absolute, in SLOW_APPROACH state
 probe_speed: 0.3              # [m/s] absolute, in CONTACT_PROBE state
                                # 0.1 m/s was too slow to push 5 kg / mu=0.05 boxes (~2.5 N friction)
 
 # ── Distance triggers ─────────────────────────────────────────────
 # Distance to nearest point in the forward ±45° sector (from 3D cloud).
-slow_approach_distance: 1.0     # [m] NORMAL_NAV → SLOW_APPROACH
-                                # Must be > cloud_range_min (0.55 m); 1.0 m gives
-                                # comfortable detection margin before the probe zone.
+slow_approach_distance: 0.7     # [m] NORMAL_NAV → SLOW_APPROACH
+                                # Must be > probe_distance (0.65 m) > cloud_range_min (0.55 m).
+                                # Lowered from 1.0 m to shorten the slow approach phase.
 probe_distance: 0.65            # [m] SLOW_APPROACH → CONTACT_PROBE
                                 # Must be > cloud_range_min (0.55 m).
                                 # Robot front ≈ 0.275 m ahead of base → at 0.65 m
@@ -54,7 +67,7 @@ probe_heading_max_deg: 25.0     # [deg] half-angle; tighten to reduce false trig
 # How far past the detected obstacle face to place the probe goal.
 # Ensures the carrot planner drives the robot into the object so movable obstacles
 # actually get pushed.  goal_dist = obs_dist + probe_push_depth.
-probe_push_depth: 0.5           # [m]
+probe_push_depth: 0.7           # [m]
 
 # ── Map update ────────────────────────────────────────────────────
 mark_radius: 0.15                # [m] radius used by the provisional-ring fallback
@@ -77,7 +90,7 @@ solid_refine_capture_radius: 0.75   # [m]
 probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up
                                 # Suspended once wrench exceeds threshold.
 contact_hold_time: 1.0          # [s] wrench must exceed threshold for this long
-classify_time: 1.5              # [s] forward push duration during classification
+classify_time: 0.6              # [s] forward push duration during classification
 
 # ── Classification criterion (ablation toggle) ─────────────────────
 # Which signal decides MOVABLE vs SOLID once the classify_time window closes.
@@ -98,7 +111,7 @@ classify_time: 1.5              # [s] forward push duration during classificatio
 classification_mode: force
 # 'force' mode only. Settled-force sampling starts this many seconds into
 # CLASSIFYING (skips the initial contact transient / static-friction breakaway).
-classification_force_settle_time: 0.5
+classification_force_settle_time: 0.2
 # 'force' mode only. MOVABLE iff the mean settled forward force stays below
 # this. Empirically derived (see FORCE_SATURATION_THRESHOLD.md at the repo
 # root) -- not an a priori fraction of robot weight. For obstacles beyond the
@@ -126,7 +139,7 @@ backup_extra_margin: 0.25       # [m] clearance beyond the inflation boundary
 backup_min_clearance: 0.60      # [m] UNKNOWN-obstacle-only rear safety stop.
                                 # Classified solids are excluded from this check.
                                 # Must be > robot_radius (0.55 m).
-backup_speed: 0.30              # [m/s] reverse speed during BACKING_UP state
+backup_speed: 0.70              # [m/s] reverse speed during BACKING_UP state
 
 backup_time: 5.0               # [s] fallback maximum backup duration.
 

@@ -49,9 +49,18 @@ class ContactProbeManager:
         # torque axes are dominated by walking-gait dynamics (see contact_probe.yaml),
         # not genuine object contact, and using them caused both false CONTACT_PROBE
         # triggers and a SOLID bias in force-mode classification. Detection and
-        # classification both rely on fx/fy only.
-        self._thr_fx  = rospy.get_param('~wrench_threshold/fx', 15.0)
-        self._thr_fy  = rospy.get_param('~wrench_threshold/fy', 10.0)
+        # classification both rely on the horizontal force (fx/fy) only.
+        # Single threshold on the HEADING-PROJECTED force (see
+        # _wrench_forward_mag), not two independent per-axis (fx, fy)
+        # thresholds -- matches the pipeline formalization's contact-detection
+        # rule |f_hat(t)| > theta exactly. The previous per-axis OR check was
+        # anisotropic: at a 45 degree approach heading it required a resultant
+        # force up to threshold*sqrt(2) to trigger (neither raw axis component
+        # alone reached the threshold), while a 0/90 degree heading only
+        # needed the threshold itself. A single threshold on the projected
+        # magnitude is isotropic -- the same required force regardless of
+        # approach heading.
+        self._contact_threshold_n = rospy.get_param('~contact_force_threshold_n', 12.0)
 
         self._filter_win   = rospy.get_param('~wrench_filter_window', 10)
         self._slow_speed   = rospy.get_param('~slow_approach_speed', 0.20)
@@ -249,6 +258,30 @@ class ContactProbeManager:
                          self._movable_excl_override_cb, queue_size=1)
         rospy.Subscriber('~solid_refine_capture_radius_override', Float64,
                          self._refine_capture_override_cb, queue_size=1)
+
+        # Live overrides for haptiquad_nav_eval's tuning_sweep_orchestrator.py
+        # (contact-probe PARAMETER-TUNING harness) -- every parameter that can
+        # influence classification TIME (approach-to-contact speed/range, the
+        # contact-confirmation dwell, the decision window and its settle
+        # time, and wrench smoothing). Deliberately excludes force thresholds
+        # (contact_force_threshold_n, classification_force_threshold_n -- those
+        # affect correctness, not timing, and the mass/mu sweep already
+        # covers them) and all map/costmap parameters. Untouched by the
+        # other two sweeps, same independence guarantee as the radius
+        # overrides above.
+        rospy.Subscriber('~probe_speed_override', Float64,
+                         self._probe_speed_override_cb, queue_size=1)
+        rospy.Subscriber('~probe_distance_override', Float64,
+                         self._probe_distance_override_cb, queue_size=1)
+        rospy.Subscriber('~contact_hold_time_override', Float64,
+                         self._contact_hold_time_override_cb, queue_size=1)
+        rospy.Subscriber('~classify_time_override', Float64,
+                         self._classify_time_override_cb, queue_size=1)
+        rospy.Subscriber('~classification_force_settle_time_override', Float64,
+                         self._force_settle_time_override_cb, queue_size=1)
+        rospy.Subscriber('~wrench_filter_window_override', Float64,
+                         self._filter_window_override_cb, queue_size=1)
+
         # "Classical" (a priori known obstacle) baseline for
         # haptiquad_nav_eval's timing sweep: injects a ground-truth
         # rectangle straight into the global costmap through the SAME
@@ -496,17 +529,19 @@ class ContactProbeManager:
         return sum(buf) / len(buf) if buf else 0.0
 
     def _wrench_above_threshold(self):
-        # fx/fy only -- see the wrench_threshold param comment: fz and the torque
-        # axes are dominated by walking-gait dynamics, not genuine contact, and
-        # including them caused both false CONTACT_PROBE triggers and a SOLID bias
-        # in force-mode classification.
-        return (abs(self._avg('fx')) > self._thr_fx or
-                abs(self._avg('fy')) > self._thr_fy)
+        # Projected onto the approach heading (_wrench_forward_mag), a single
+        # threshold for both directions -- see contact_force_threshold_n's
+        # comment above for why this replaced two independent per-axis (fx,
+        # fy) thresholds. fz/torques are still excluded: dominated by
+        # walking-gait dynamics, not genuine contact, and including them
+        # caused both false CONTACT_PROBE triggers and a SOLID bias in
+        # force-mode classification.
+        return self._wrench_forward_mag() > self._contact_threshold_n
 
     def _wrench_forward_mag(self):
         """|Horizontal force along probe_entry_yaw| -- used for force-mode
         classification. fz is deliberately excluded: it's dominated by
-        walking-gait bounce (see wrench_threshold's own comment) and oscillates
+        walking-gait bounce (see contact_force_threshold_n's comment) and oscillates
         independently of whether the object actually moved, which would swamp
         the settled-force reading force-mode classification is based on.
         Projecting onto the approach heading (rather than sqrt(fx^2+fy^2)) also
@@ -788,6 +823,35 @@ class ContactProbeManager:
 
     def _refine_capture_override_cb(self, msg):
         self._refine_capture_r = msg.data
+
+    def _probe_speed_override_cb(self, msg):
+        self._probe_speed = msg.data
+
+    def _probe_distance_override_cb(self, msg):
+        self._probe_dist = msg.data
+
+    def _contact_hold_time_override_cb(self, msg):
+        self._hold_time = msg.data
+
+    def _classify_time_override_cb(self, msg):
+        self._classify_time = msg.data
+
+    def _force_settle_time_override_cb(self, msg):
+        self._force_settle_time = msg.data
+
+    def _filter_window_override_cb(self, msg):
+        """wrench_filter_window controls the wrench deques' maxlen, which
+        (unlike the other overrides here) can't just be reassigned -- a
+        Python deque's maxlen is fixed at construction. Rebuild each deque
+        from its own current contents at the new length instead of clearing
+        it, so an override mid-run doesn't throw away recent samples for no
+        reason."""
+        new_win = max(1, int(round(msg.data)))
+        if new_win == self._filter_win:
+            return
+        self._filter_win = new_win
+        for k in self._wrench_buf:
+            self._wrench_buf[k] = collections.deque(self._wrench_buf[k], maxlen=new_win)
 
     def _inject_known_solid_cb(self, msg):
         """haptiquad_nav_eval's timing_sweep_orchestrator.py only (classical
