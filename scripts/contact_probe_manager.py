@@ -16,6 +16,9 @@ A separate twist_stamper node wraps move_base Twist → TwistStamped for twist_m
 import math
 import struct
 import collections
+import functools
+import threading
+import traceback
 import numpy as np
 
 import rospy
@@ -41,9 +44,25 @@ CLASSIFYING   = 'CLASSIFYING'
 BACKING_UP    = 'BACKING_UP'
 
 
+def _synchronized(fn):
+    """Run a callback under self._lock. rospy runs every subscriber, timer
+    and service callback in its own thread, so without this the ~reset
+    service (or a probing toggle / known-solid injection) can interleave
+    with _update mid-transition and leave state from the previous trial --
+    observed in haptiquad_nav_eval's tuning sweep as a SOLID decision
+    logged before the new trial ever entered CONTACT_PROBE."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 class ContactProbeManager:
 
     def __init__(self):
+        self._lock = threading.RLock()
+
         # ── Parameters ────────────────────────────────────────────────────────
         # fz/tx/ty/tz are deliberately NOT used for contact detection: fz and the
         # torque axes are dominated by walking-gait dynamics (see contact_probe.yaml),
@@ -313,7 +332,7 @@ class ContactProbeManager:
         rospy.Subscriber('/move_base_simple/goal', PoseStamped,           self._simple_goal_cb, queue_size=1)
 
         # ── Main loop ─────────────────────────────────────────────────────────
-        rospy.Timer(rospy.Duration(self._update_period_target), self._update)
+        rospy.Timer(rospy.Duration(self._update_period_target), self._update_guarded)
         rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_obstacles())
         rospy.Timer(rospy.Duration(2.0), lambda _: self._publish_movable_obstacles())
         rospy.Timer(rospy.Duration(1.0), self._publish_diagnostics)
@@ -334,6 +353,7 @@ class ContactProbeManager:
         rospy.loginfo('[ContactProbe] User goal: (%.2f, %.2f)',
                       msg.pose.position.x, msg.pose.position.y)
 
+    @_synchronized
     def _wrench_cb(self, msg):
         w = msg.wrench
         self._wrench_buf['fx'].append(w.force.x)
@@ -769,6 +789,7 @@ class ContactProbeManager:
 
     # ── External reset hook ──────────────────────────────────────────────────
 
+    @_synchronized
     def _reset_cb(self, _req):
         """Clear accumulated obstacle memory and return to NORMAL_NAV.
 
@@ -797,6 +818,7 @@ class ContactProbeManager:
         self._publish_movable_obstacles()  # same
         return EmptyResponse()
 
+    @_synchronized
     def _set_probing_enabled_cb(self, req):
         """haptiquad_nav_eval's timing_sweep_orchestrator.py only -- disables
         the entire contact-probe state machine so a "classical" trial measures
@@ -839,6 +861,7 @@ class ContactProbeManager:
     def _force_settle_time_override_cb(self, msg):
         self._force_settle_time = msg.data
 
+    @_synchronized
     def _filter_window_override_cb(self, msg):
         """wrench_filter_window controls the wrench deques' maxlen, which
         (unlike the other overrides here) can't just be reassigned -- a
@@ -853,6 +876,7 @@ class ContactProbeManager:
         for k in self._wrench_buf:
             self._wrench_buf[k] = collections.deque(self._wrench_buf[k], maxlen=new_win)
 
+    @_synchronized
     def _inject_known_solid_cb(self, msg):
         """haptiquad_nav_eval's timing_sweep_orchestrator.py only (classical
         arm) -- injects a KNOWN ground-truth rectangle (any orientation, map
@@ -922,6 +946,16 @@ class ContactProbeManager:
 
     # ── Main update loop ──────────────────────────────────────────────────────
 
+    def _update_guarded(self, event):
+        """An exception escaping a rospy.Timer callback kills that timer's
+        thread silently, freezing the state machine with speed_limit latched
+        at whatever it last was. Log it and keep the loop alive instead."""
+        try:
+            self._update(event)
+        except Exception:
+            rospy.logerr_throttle(5.0, '[ContactProbe] _update raised:\n%s' % traceback.format_exc())
+
+    @_synchronized
     def _update(self, _event):
         now = rospy.Time.now()
         if self._last_update_wall is not None:
