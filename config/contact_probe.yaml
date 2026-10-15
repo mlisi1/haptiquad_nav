@@ -46,7 +46,9 @@ wrench_filter_window: 50        # samples
 # ── Speed profiles ────────────────────────────────────────────────
 normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
 slow_approach_speed: 0.30       # [m/s] absolute, in SLOW_APPROACH state
-probe_speed: 0.3              # [m/s] absolute, in CONTACT_PROBE state
+probe_speed: 0.4              # [m/s] absolute, in CONTACT_PROBE state
+                               # tuning_sweep_02: solid accuracy 0.2→0.65, 0.3→0.96, 0.4→0.99
+                               # (slower probes are still ramping force when the window closes)
                                # 0.1 m/s was too slow to push 5 kg / mu=0.05 boxes (~2.5 N friction)
 
 # ── Distance triggers ─────────────────────────────────────────────
@@ -89,7 +91,9 @@ solid_refine_capture_radius: 0.75   # [m]
 # ── Timing ────────────────────────────────────────────────────────
 probe_timeout: 20.0             # [s] max time in CONTACT_PROBE before giving up
                                 # Suspended once wrench exceeds threshold.
-contact_hold_time: 1.0          # [s] wrench must exceed threshold for this long
+contact_hold_time: 0.4          # [s] wrench must exceed threshold for this long
+                                # tuning_sweep_02: at probe_speed 0.4 every hold>=0.4 cell is 100% solid;
+                                # 0.2 is not (0.96). Was 1.0 (contact->decision 1.7 s, now ~1.05 s).
 classify_time: 0.6              # [s] forward push duration during classification
 
 # ── Classification criterion (ablation toggle) ─────────────────────
