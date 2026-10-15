@@ -187,3 +187,31 @@ movable_excl_radius: 1.5        # [m] contact_point ± expected push travel + ma
 # stealing returns from unrelated objects.
 movable_track_radius: 0.5       # [m] search radius around stored movable center
 movable_track_min_pts: 3        # minimum lidar returns required to accept an update
+
+# ── Safety (see contact_probe_robot.yaml for the hardware values) ────────────
+# Inputs older than these halt the robot (HALTED: goals cancelled, speed 0,
+# motion_allowed False; a new goal resumes once everything is healthy).
+input_timeout:
+  wrench: 0.3                  # [s]
+  pose: 2.5                    # [s] >= 2.5x the /slam/pose period
+  cloud: 1.0                   # [s]
+require_health: true           # need nav_supervisor's /haptiquad_nav/health heartbeat
+health_timeout: 0.5            # [s]
+# |fx,fy| above collision_force_threshold_n for collision_hold_time outside
+# CONTACT_PROBE/CLASSIFYING halts the robot (side/rear hits, obstacles the
+# lidar missed). Bound is classification_force_threshold_n while pushing an
+# object already classified MOVABLE; ignored for the first
+# collision_backup_grace_s of BACKING_UP.
+collision_stop_enabled: true
+collision_force_threshold_n: 30.0   # [N] above the ~5-8N horizontal gait noise
+collision_hold_time: 0.3            # [s]
+collision_backup_grace_s: 1.5       # [s]
+wrench_bias_calibration_s: 0.0      # [s] 0 = off (sim has no wrench bias)
+wrench_filter_window_s: 0.0         # [s] 0 = use wrench_filter_window (samples)
+max_wrench_bias_n: 40.0
+cloud_height_reference: base        # base | gravity
+self_filter_box: []                 # [x_min, x_max, y_min, y_max] base frame, [] = off
+# Reset/override/injection services for haptiquad_nav_eval. Set by
+# navigation.launch eval_mode:=true only.
+eval_mode: false
+

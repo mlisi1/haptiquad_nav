@@ -1,61 +1,50 @@
 <launch>
   <!-- ============================================================
-       HaptiQuad Navigation Stack
-       Two-costmap architecture:
-         - free_costmap   : planner world (all free until confirmed solid)
-         - perception_costmap : sensor world (all detected obstacles)
+       HaptiQuad Navigation Stack: entry point.
+
+       Starts only what does not move the robot: the odom/wrench bridges,
+       anymal_motion_init (e-stop clear + walk mode, right away) and
+       nav_supervisor. nav_supervisor starts navigation_core.launch
+       (move_base, contact_probe_manager, cmd_vel_gate, ...) only once every
+       input in config/nav_supervisor.yaml is healthy and walk mode is
+       reached, and keeps publishing /haptiquad_nav/health afterwards.
+       No velocity command reaches twist_mux unless that heartbeat and
+       contact_probe_manager's motion_allowed are both True.
+
+       Two costmaps: global = only confirmed solids; local = all free.
+
+       platform:=robot (default) loads the *_robot.yaml overlays and uses a
+       rolling global costmap (no map_server); platform:=sim keeps the
+       simulation configuration (pass use_sim_time:=true too).
   ============================================================ -->
 
-  <arg name="robot_name"        default="anymal"/>
-  <arg name="odom_frame"        default="odom"/>
-  <arg name="base_frame"        default="base"/>
-  <arg name="map_frame"         default="map"/>
-  <arg name="use_sim_time"      default="true"/>
-  <arg name="map_server"        default="true"/>
+  <arg name="platform"          default="robot" doc="robot | sim"/>
+  <arg name="use_sim_time"      default="$(eval platform == 'sim')"/>
+  <arg name="map_server"        default="$(eval platform == 'sim')"/>
   <arg name="map_file"          default="$(find haptiquad_nav)/maps/empty.yaml"/>
+  <arg name="map_frame"         default="map"/>
   <arg name="pointcloud_topic"  default="/lidar/point_cloud"/>
   <arg name="wrench_topic"      default="/anymal/base_wrench"/>
+  <!-- twist_mux input the gate publishes to. On the robot, check its
+       twist_mux config: this input must rank below the joystick and must
+       not be shared with the native path follower. -->
   <arg name="cmd_vel_topic"     default="/path_planning_and_following/twist"/>
-  <!-- move_base publishes raw Twist here; twist_stamper wraps it as TwistStamped -->
+  <!-- move_base publishes raw Twist here; cmd_vel_gate stamps and gates it -->
   <arg name="cmd_vel_raw_topic" default="/haptiquad_nav/cmd_vel_raw"/>
   <!-- set to false if robot is already in walk mode -->
   <arg name="init_robot"        default="true"/>
-  <!-- set to false to suppress RViz -->
   <arg name="rviz"              default="false"/>
   <arg name="rviz_config"       default="$(find haptiquad_nav)/config/navigation.rviz"/>
-  <!-- MOVABLE/SOLID classification criterion (ablation toggle).
-       Leave blank (default) to use whatever contact_probe.yaml sets; pass
-       'displacement' or 'force' here only to override it for this launch
-       (e.g. `classification_mode:=force`).
-       See contact_probe.yaml's "Classification criterion" section. -->
+  <!-- MOVABLE/SOLID criterion override ('force' | 'displacement'); blank =
+       contact_probe.yaml. See its "Classification criterion" section. -->
   <arg name="classification_mode" default=""/>
+  <!-- haptiquad_nav_eval sweeps only: enables contact_probe_manager's
+       reset/override/injection hooks. Never on the robot. -->
+  <arg name="eval_mode"         default="false"/>
 
   <param name="/use_sim_time" value="$(arg use_sim_time)"/>
-
-  <!-- ── Map server (empty map — all free) ─────────────────────── -->
-  <group if="$(arg map_server)">
-    <node name="map_server" pkg="map_server" type="map_server"
-          args="$(arg map_file)" output="screen">
-      <param name="frame_id" value="$(arg map_frame)"/>
-    </node>
-  </group>
-
-  <!-- ── move_base ─────────────────────────────────────────────── -->
-  <node name="move_base" pkg="move_base" type="move_base"
-        respawn="false" output="screen">
-
-    <rosparam file="$(find haptiquad_nav)/config/move_base.yaml"       command="load"/>
-    <rosparam file="$(find haptiquad_nav)/config/global_planner.yaml"  command="load" ns="GlobalPlanner"/>
-    <rosparam file="$(find haptiquad_nav)/config/haptiquad_nav_planner.yaml"  command="load" ns="HaptiQuadNavPlanner"/>
-    <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="global_costmap"/>
-    <rosparam file="$(find haptiquad_nav)/config/costmap_common.yaml"  command="load" ns="local_costmap"/>
-    <rosparam file="$(find haptiquad_nav)/config/global_costmap.yaml"  command="load" ns="global_costmap"/>
-    <rosparam file="$(find haptiquad_nav)/config/local_costmap.yaml"   command="load" ns="local_costmap"/>
-
-    <!-- move_base publishes raw Twist here; twist_stamper wraps it for twist_mux -->
-    <remap from="cmd_vel" to="$(arg cmd_vel_raw_topic)"/>
-    <remap from="odom"    to="/odom"/>
-  </node>
+  <!-- Reset every launch: nav_supervisor waits for anymal_motion_init to set it. -->
+  <param name="/haptiquad_nav/motion_initialized" value="false" if="$(arg init_robot)"/>
 
   <!-- ── Odom bridge: pose_in_odom + twist → nav_msgs/Odometry ─── -->
   <node name="odom_bridge" pkg="haptiquad_nav"
@@ -67,58 +56,27 @@
     <remap from="base_wrench" to="$(arg wrench_topic)"/>
   </node>
 
-  <!-- ── Twist → TwistStamped adapter (move_base → twist_mux) ────── -->
-  <!-- move_base publishes plain Twist; twist_mux expects TwistStamped. -->
-  <node name="twist_stamper" pkg="haptiquad_nav"
-        type="twist_stamper.py" output="screen">
-    <remap from="cmd_vel_in"  to="$(arg cmd_vel_raw_topic)"/>
-    <remap from="cmd_vel_out" to="$(arg cmd_vel_topic)"/>
-  </node>
-
-  <!-- ── HaptiQuad contact-probe state machine ─────────────────── -->
-  <!-- contact_probe_manager is NOT in the velocity pipeline.
-       It manages move_base goals via actionlib and publishes
-       /haptiquad_nav/speed_limit consumed by the carrot planner. -->
-  <node name="contact_probe_manager" pkg="haptiquad_nav"
-        type="contact_probe_manager.py" output="screen">
-    <rosparam file="$(find haptiquad_nav)/config/contact_probe.yaml" command="load"/>
-    <param name="classification_mode" value="$(arg classification_mode)"
-           if="$(eval classification_mode != '')"/>
-    <remap from="base_wrench"    to="$(arg wrench_topic)"/>
-    <remap from="point_cloud_in" to="$(arg pointcloud_topic)"/>
-  </node>
-
-  <!-- ── Relay ANYmal RViz /goal → /move_base_simple/goal ─────── -->
-  <!-- The ANYmal RViz config publishes 2D Nav Goal to /goal, not the
-       move_base default /move_base_simple/goal. This relay bridges them. -->
-  <node pkg="topic_tools" type="relay" name="goal_relay"
-        args="/goal /move_base_simple/goal"/>
-
   <!-- ── ANYmal motion initializer (estop clear + trekker walk) ── -->
   <node if="$(arg init_robot)" name="anymal_motion_init"
         pkg="haptiquad_anymal_bringup" type="init_motion.py" output="screen"/>
 
-  <!-- ── Debug perception costmap (visualization only) ─────────── -->
-  <!-- Rolling 20×20 m OccupancyGrid built directly from the raw 3D lidar
-       cloud (same source as contact_probe_manager, 360° coverage).
-       Confirmed solid obstacles are suppressed — they live in the global
-       costmap. NOT connected to move_base — purely for RViz inspection. -->
-  <node name="debug_costmap" pkg="haptiquad_nav"
-        type="debug_costmap.py" output="screen">
-    <param name="inflation_radius"    value="0.80"/>
-    <param name="cost_scaling_factor" value="3.0"/>
-    <param name="robot_radius"        value="0.55"/>
-    <param name="solid_excl_radius"   value="0.7"/>
-    <param name="cloud_height_min"    value="-0.10"/>
-    <param name="cloud_height_max"    value="1.20"/>
-    <param name="cloud_range_min"     value="0.55"/>
-    <param name="cloud_range_max"     value="8.0"/>
-    <remap from="point_cloud_in"      to="$(arg pointcloud_topic)"/>
+  <!-- ── Preflight + health monitor; starts navigation_core.launch ── -->
+  <node name="nav_supervisor" pkg="haptiquad_nav" type="nav_supervisor.py"
+        output="screen" required="true">
+    <rosparam file="$(find haptiquad_nav)/config/nav_supervisor.yaml" command="load"/>
+    <param name="wait_for_true_param" value="/haptiquad_nav/motion_initialized"
+           if="$(arg init_robot)"/>
+    <param name="core_args" value="platform:=$(arg platform)
+                                   map_server:=$(arg map_server)
+                                   map_file:=$(arg map_file)
+                                   map_frame:=$(arg map_frame)
+                                   pointcloud_topic:=$(arg pointcloud_topic)
+                                   wrench_topic:=$(arg wrench_topic)
+                                   cmd_vel_topic:=$(arg cmd_vel_topic)
+                                   cmd_vel_raw_topic:=$(arg cmd_vel_raw_topic)
+                                   rviz:=$(arg rviz)
+                                   rviz_config:=$(arg rviz_config)
+                                   classification_mode:='$(arg classification_mode)'
+                                   eval_mode:=$(arg eval_mode)"/>
   </node>
-
-  <!-- ── RViz ──────────────────────────────────────────────────── -->
-  <node if="$(arg rviz)" name="rviz" pkg="rviz" type="rviz"
-        args="-d $(arg rviz_config)" output="screen"/>
-
-
 </launch>

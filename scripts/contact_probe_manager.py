@@ -8,10 +8,13 @@ States:
   CONTACT_PROBE — probe goal sent to move_base; speed_limit=probe_speed; wrench monitored
   CLASSIFYING   — probe goal still active; displacement measured for classify_time
   BACKING_UP    — backup goal sent to move_base; speed_limit=backup_speed
+  CALIBRATING   — startup only (wrench_bias_calibration_s > 0): wrench bias averaged, no motion
+  HALTED        — stale/unhealthy input, unexpected contact or a reported fault:
+                  goals cancelled, speed_limit=0; a new user goal resumes
 
 contact_probe_manager is NOT in the velocity pipeline.  It manages move_base goals
-and publishes /haptiquad_nav/speed_limit consumed by the carrot planner.
-A separate twist_stamper node wraps move_base Twist → TwistStamped for twist_mux.
+and publishes /haptiquad_nav/speed_limit consumed by the carrot planner, plus the
+/haptiquad_nav/motion_allowed heartbeat cmd_vel_gate requires to forward commands.
 """
 import math
 import struct
@@ -26,7 +29,7 @@ import tf.transformations
 import tf2_ros
 import actionlib
 
-from std_msgs.msg import Float64, String
+from std_msgs.msg import Bool, Float64, String
 from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
                                 PoseWithCovarianceStamped, PolygonStamped)
 from sensor_msgs.msg import PointCloud2, PointField
@@ -42,6 +45,11 @@ SLOW_APPROACH = 'SLOW_APPROACH'
 CONTACT_PROBE = 'CONTACT_PROBE'
 CLASSIFYING   = 'CLASSIFYING'
 BACKING_UP    = 'BACKING_UP'
+# Startup only: averaging the standing wrench to remove its bias. No motion.
+CALIBRATING   = 'CALIBRATING'
+# Safety stop: goals cancelled, speed_limit 0, motion_allowed False. Left only
+# by a NEW user goal once every input is healthy again (see _simple_goal_cb).
+HALTED        = 'HALTED'
 
 
 def _synchronized(fn):
@@ -137,12 +145,48 @@ class ContactProbeManager:
         _probe_heading_deg     = rospy.get_param('~probe_heading_max_deg', 25.0)
         self._probe_heading_thr = math.radians(_probe_heading_deg)
 
+        # ── Safety ─────────────────────────────────────────────────────────────
+        # Inputs older than these (receive time) halt the robot: without them
+        # the state machine would act on frozen wrench/pose/obstacle data.
+        self._wrench_timeout = rospy.get_param('~input_timeout/wrench', 0.3)
+        self._pose_timeout   = rospy.get_param('~input_timeout/pose', 1.0)
+        self._cloud_timeout  = rospy.get_param('~input_timeout/cloud', 1.0)
+        # Heartbeat from nav_supervisor.py (all navigation inputs healthy).
+        self._require_health = rospy.get_param('~require_health', True)
+        self._health_timeout = rospy.get_param('~health_timeout', 0.5)
+        # Contact outside CONTACT_PROBE/CLASSIFYING (side/rear hits, anything
+        # the lidar filter missed): |fx,fy| above this for collision_hold_time
+        # halts the robot. While pushing an object already classified MOVABLE
+        # the bound is classification_force_threshold_n instead.
+        self._collision_stop  = rospy.get_param('~collision_stop_enabled', True)
+        self._collision_thr   = rospy.get_param('~collision_force_threshold_n', 30.0)
+        self._collision_hold  = rospy.get_param('~collision_hold_time', 0.3)
+        self._collision_backup_grace = rospy.get_param('~collision_backup_grace_s', 1.5)
+        # Standing-wrench bias removal at startup (0 disables). Also measures
+        # the wrench rate, so wrench_filter_window_s (if > 0) can set the
+        # filter window in seconds rather than samples.
+        self._bias_calib_time = rospy.get_param('~wrench_bias_calibration_s', 0.0)
+        self._filter_win_s    = rospy.get_param('~wrench_filter_window_s', 0.0)
+        # Reset/override/injection hooks for haptiquad_nav_eval only. Off by
+        # default so nothing on the robot network can disable probing or
+        # change probe parameters.
+        self._eval_mode = rospy.get_param('~eval_mode', False)
+
         # ── 3D cloud parameters ────────────────────────────────────────────────
         self._cloud_h_min  = rospy.get_param('~cloud_height_min', -0.10)
         self._cloud_h_max  = rospy.get_param('~cloud_height_max', 1.20)
         self._cloud_r_min  = rospy.get_param('~cloud_range_min', 0.55)
         self._cloud_r_max  = rospy.get_param('~cloud_range_max', 8.0)
         self._fwd_sector   = math.radians(rospy.get_param('~forward_sector_deg', 45.0))
+        # 'base': cloud_height_min/max are along the base z axis (tilts with
+        # the body). 'gravity': along gravity, still relative to the base
+        # origin, so pitching on slopes doesn't shift the band into the
+        # ground or over low obstacles.
+        self._cloud_h_ref  = rospy.get_param('~cloud_height_reference', 'base')
+        self._odom_frame   = rospy.get_param('~odom_frame', 'odom')
+        # [x_min, x_max, y_min, y_max] in base frame: drop returns from the
+        # robot's own body/legs. Empty = disabled (cloud_range_min only).
+        self._self_box     = rospy.get_param('~self_filter_box', [])
         solid_excl         = rospy.get_param('~solid_excl_radius', 0.7)
         self._solid_excl_r2 = solid_excl ** 2
         movable_excl        = rospy.get_param('~movable_excl_radius', 1.5)
@@ -165,8 +209,19 @@ class ContactProbeManager:
         self._probing_enabled = True
 
         # ── State ─────────────────────────────────────────────────────────────
-        self._state = NORMAL_NAV
+        self._state = CALIBRATING if self._bias_calib_time > 0 else NORMAL_NAV
         self._state_enter_time = rospy.Time.now()
+        self._halt_reason = ''
+        self._last_wrench_t = None
+        self._last_pose_t   = None
+        self._last_cloud_t  = None
+        self._last_health_t = None
+        self._health_ok     = False
+        self._collision_since = None
+        self._bias = {'fx': 0.0, 'fy': 0.0}
+        self._calib_samples = []   # (t, fx, fy) while CALIBRATING
+        self._motion_allowed = False
+        self._max_bias = rospy.get_param('~max_wrench_bias_n', 40.0)
 
         # ── Runtime diagnostics (loop rate / wrench latency) ────────────────────
         # Consumed by haptiquad_nav_eval's trial_logger.py, but standalone-useful
@@ -256,12 +311,21 @@ class ContactProbeManager:
             '/haptiquad_nav/nearest_obstacle_distance', Float64, queue_size=1)
         self._nearest_rear_obs_pub = rospy.Publisher(
             '/haptiquad_nav/nearest_rear_obstacle_distance', Float64, queue_size=1)
+        # 10Hz heartbeat read by cmd_vel_gate.py: True only when this node is
+        # alive, calibrated, not HALTED and all its inputs are fresh. If this
+        # node (or its update loop) dies, the heartbeat stops and the gate
+        # stops forwarding velocity commands.
+        self._motion_allowed_pub = rospy.Publisher(
+            '/haptiquad_nav/motion_allowed', Bool, queue_size=1)
+        self._halt_reason_pub = rospy.Publisher(
+            '/haptiquad_nav/halt_reason', String, queue_size=1, latch=True)
 
         # Reset hook for external harnesses (e.g. haptiquad_nav_eval) that
         # reset the Gazebo world / robot pose between trials. Without this,
         # _solid_obstacles / _movable_obstacles / the permanent costmap marks
         # accumulate for the node's entire lifetime and silently leak into
         # the next trial after a world reset.
+    def _register_eval_hooks(self):
         self._reset_srv = rospy.Service('~reset', Empty, self._reset_cb)
 
         # Opt-in bypass switch + live radius overrides for haptiquad_nav_eval's
@@ -313,15 +377,23 @@ class ContactProbeManager:
         rospy.Subscriber('~inject_known_solid', PolygonStamped,
                          self._inject_known_solid_cb, queue_size=1)
 
-        # Publish uncapped speed at startup
+    def start(self):
+        # No motion until calibrated: speed 0 while CALIBRATING.
         self._set_speed_limit(float('inf'))
         self._state_pub.publish(String(data=self._state))
 
         # ── move_base action client ───────────────────────────────────────────
+        # Wait as long as it takes: running without move_base would make
+        # every goal/cancel below a silent no-op.
         self._mb_client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
-        rospy.loginfo('[ContactProbe] Waiting for move_base action server…')
-        self._mb_client.wait_for_server(timeout=rospy.Duration(30.0))
+        while not rospy.is_shutdown():
+            rospy.loginfo('[ContactProbe] Waiting for move_base action server…')
+            if self._mb_client.wait_for_server(timeout=rospy.Duration(10.0)):
+                break
         rospy.loginfo('[ContactProbe] move_base ready.')
+        if self._eval_mode:   # the hooks use _mb_client, so only now
+            rospy.logwarn('[ContactProbe] eval_mode: reset/override/injection hooks enabled.')
+            self._register_eval_hooks()
 
         # ── Subscribers ───────────────────────────────────────────────────────
         rospy.Subscriber('base_wrench',       WrenchStamped,              self._wrench_cb,  queue_size=1)
@@ -330,6 +402,13 @@ class ContactProbeManager:
         # Track USER goals only — internal probe/backup goals are sent via _mb_client
         # directly and must NOT overwrite _last_goal.
         rospy.Subscriber('/move_base_simple/goal', PoseStamped,           self._simple_goal_cb, queue_size=1)
+        rospy.Subscriber('/haptiquad_nav/health', Bool,                   self._health_cb, queue_size=1)
+        # Faults detected downstream (cmd_vel_gate.py: controller stuck, bad
+        # command) -- halt here too so no goal stays active behind a closed gate.
+        rospy.Subscriber('/haptiquad_nav/fault', String, self._fault_cb, queue_size=10)
+
+        # Calibration window starts now that wrench samples can arrive.
+        self._state_enter_time = rospy.Time.now()
 
         # ── Main loop ─────────────────────────────────────────────────────────
         rospy.Timer(rospy.Duration(self._update_period_target), self._update_guarded)
@@ -345,8 +424,26 @@ class ContactProbeManager:
 
     # ── Subscriber callbacks ──────────────────────────────────────────────────
 
+    @_synchronized
     def _simple_goal_cb(self, msg):
-        """Store the user's navigation goal (PoseStamped → MoveBaseGoal)."""
+        """Store the user's navigation goal (PoseStamped → MoveBaseGoal).
+        move_base receives the same goal directly; while CALIBRATING, or
+        HALTED with an input still unhealthy, it is cancelled straight away.
+        A new goal is the only way out of HALTED."""
+        if self._state == CALIBRATING:
+            rospy.logwarn('[ContactProbe] Goal ignored: wrench bias calibration in progress.')
+            self._mb_client.cancel_all_goals()
+            return
+        if self._state == HALTED:
+            problem = self._input_problem()
+            if problem:
+                rospy.logwarn('[ContactProbe] Goal ignored, still HALTED: %s', problem)
+                self._mb_client.cancel_all_goals()
+                return
+            rospy.loginfo('[ContactProbe] New goal received -- leaving HALTED.')
+            self._halt_reason = ''
+            self._halt_reason_pub.publish(String(data=''))
+            self._enter(NORMAL_NAV)
         goal = MoveBaseGoal()
         goal.target_pose = msg
         self._last_goal = goal
@@ -356,8 +453,15 @@ class ContactProbeManager:
     @_synchronized
     def _wrench_cb(self, msg):
         w = msg.wrench
-        self._wrench_buf['fx'].append(w.force.x)
-        self._wrench_buf['fy'].append(w.force.y)
+        fx, fy = w.force.x, w.force.y
+        if not (math.isfinite(fx) and math.isfinite(fy)):
+            rospy.logwarn_throttle(2.0, '[ContactProbe] Non-finite wrench dropped.')
+            return
+        self._last_wrench_t = rospy.Time.now()
+        if self._state == CALIBRATING:
+            self._calib_samples.append((self._last_wrench_t.to_sec(), fx, fy))
+        self._wrench_buf['fx'].append(fx - self._bias['fx'])
+        self._wrench_buf['fy'].append(fy - self._bias['fy'])
         self._wrench_buf['fz'].append(w.force.z)
         self._wrench_buf['tx'].append(w.torque.x)
         self._wrench_buf['ty'].append(w.torque.y)
@@ -398,6 +502,8 @@ class ContactProbeManager:
         valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
         x, y, z = x[valid], y[valid], z[valid]
         if x.size == 0:
+            # Not counted as fresh: a real lidar never returns nothing, so a
+            # run of empty clouds is a sensor problem, not free space.
             self._nearest_obs = float('inf')
             return
 
@@ -408,7 +514,23 @@ class ContactProbeManager:
         pts_b = np.stack([x, y, z], axis=1) @ R.T + T
         xb, yb, zb = pts_b[:, 0], pts_b[:, 1], pts_b[:, 2]
 
+        if self._cloud_h_ref == 'gravity':
+            try:
+                q_ob = self._tf_buf.lookup_transform(
+                    self._odom_frame, 'base', rospy.Time(0)).transform.rotation
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException) as e:
+                rospy.logwarn_throttle(5.0, '[ContactProbe] TF lookup failed: %s', e)
+                return
+            R_ob = tf.transformations.quaternion_matrix([q_ob.x, q_ob.y, q_ob.z, q_ob.w])[:3, :3]
+            zb = pts_b @ R_ob[2, :]   # height along gravity, base origin
+        # Fresh only once every lookup succeeded; the rest is filtering.
+        self._last_cloud_t = rospy.Time.now()
+
         h_ok = (zb >= self._cloud_h_min) & (zb <= self._cloud_h_max)
+        if len(self._self_box) == 4:
+            bx0, bx1, by0, by1 = self._self_box
+            h_ok &= ~((xb >= bx0) & (xb <= bx1) & (yb >= by0) & (yb <= by1))
         xb, yb = xb[h_ok], yb[h_ok]
         if xb.size == 0:
             self._nearest_obs = float('inf')
@@ -535,6 +657,11 @@ class ContactProbeManager:
 
     def _pose_cb(self, msg):
         p = msg.pose.pose
+        if not all(math.isfinite(v) for v in (p.position.x, p.position.y, p.orientation.z,
+                                              p.orientation.w)):
+            rospy.logwarn_throttle(2.0, '[ContactProbe] Non-finite pose dropped.')
+            return
+        self._last_pose_t = rospy.Time.now()
         self._robot_x = p.position.x
         self._robot_y = p.position.y
         q = p.orientation
@@ -574,7 +701,10 @@ class ContactProbeManager:
     # ── Speed limit ───────────────────────────────────────────────────────────
 
     def _set_speed_limit(self, v):
-        """Publish a speed cap consumed by the carrot planner."""
+        """Publish a speed cap consumed by the carrot planner. HALTED and
+        CALIBRATING always publish 0, whatever a caller asks for."""
+        if self._state in (HALTED, CALIBRATING) or math.isnan(v) or v < 0.0:
+            v = 0.0
         self._speed_limit_pub.publish(Float64(data=v))
 
     # ── Solid obstacle cloud ──────────────────────────────────────────────────
@@ -784,6 +914,9 @@ class ContactProbeManager:
             self._send_backup_goal()   # preempts active probe/classify goal implicitly
             self._set_speed_limit(self._backup_speed)
 
+        elif new_state == HALTED:
+            self._set_speed_limit(0.0)
+
     def _elapsed(self):
         return (rospy.Time.now() - self._state_enter_time).to_sec()
 
@@ -801,6 +934,7 @@ class ContactProbeManager:
         itself owns.
         """
         rospy.loginfo('[ContactProbe] Reset requested -- clearing obstacle memory and state.')
+        self._halt_reason = ''
         self._mb_client.cancel_all_goals()
         self._solid_obstacles = []
         self._solid_pts = []
@@ -932,9 +1066,10 @@ class ContactProbeManager:
 
         status = DiagnosticStatus()
         status.name = 'contact_probe_manager'
-        status.level = DiagnosticStatus.OK
-        status.message = 'running'
+        status.level = DiagnosticStatus.ERROR if self._state == HALTED else DiagnosticStatus.OK
+        status.message = self._state
         status.values = [
+            KeyValue(key='halt_reason',         value=self._halt_reason),
             KeyValue(key='loop_rate_hz',        value='%.2f' % loop_rate),
             KeyValue(key='loop_rate_target_hz', value='%.2f' % (1.0 / self._update_period_target)),
             KeyValue(key='wrench_latency_ms',   value='%.2f' % latency_ms),
@@ -944,6 +1079,134 @@ class ContactProbeManager:
         arr.status = [status]
         self._diag_pub.publish(arr)
 
+    # ── Safety ───────────────────────────────────────────────────────────────
+
+    def _health_cb(self, msg):
+        self._last_health_t = rospy.Time.now()
+        self._health_ok = msg.data
+
+    def _fault_cb(self, msg):
+        self._halt('fault reported: %s' % msg.data)
+
+    def _input_problem(self):
+        """'' if every input this node acts on is fresh and healthy, else why not."""
+        now = rospy.Time.now()
+        for name, t, timeout in (('wrench', self._last_wrench_t, self._wrench_timeout),
+                                 ('pose', self._last_pose_t, self._pose_timeout),
+                                 ('point cloud', self._last_cloud_t, self._cloud_timeout)):
+            if t is None:
+                return 'no %s received yet' % name
+            age = (now - t).to_sec()
+            if age > timeout:
+                return '%s stale (%.2fs > %.2fs)' % (name, age, timeout)
+        if self._require_health:
+            if self._last_health_t is None:
+                return 'no health heartbeat from nav_supervisor'
+            age = (now - self._last_health_t).to_sec()
+            if age > self._health_timeout:
+                return 'nav_supervisor heartbeat stale (%.2fs)' % age
+            if not self._health_ok:
+                return 'nav_supervisor reports an unhealthy input'
+        return ''
+
+    @_synchronized
+    def _halt(self, reason):
+        """Stop everything: cancel goals, speed 0, motion_allowed False.
+        Obstacle memory is kept. Leaving HALTED needs a new user goal."""
+        if self._state == HALTED:
+            return
+        rospy.logerr('[ContactProbe] HALT in %s: %s', self._state, reason)
+        if self._state == BACKING_UP:
+            self._refine_last_solid()   # don't leave the solid's mark as an empty placeholder
+        self._halt_reason = reason
+        self._halt_reason_pub.publish(String(data=reason))
+        self._mb_client.cancel_all_goals()
+        self._wrench_above_since = None
+        self._collision_since = None
+        self._goal_needs_resend = False
+        self._enter(HALTED)
+
+    def _calibration_step(self):
+        """End of CALIBRATING: wrench bias = mean standing fx/fy."""
+        if self._elapsed() < self._bias_calib_time:
+            return
+        samples = self._calib_samples
+        if len(samples) < 10:
+            rospy.logwarn_throttle(5.0, '[ContactProbe] Calibration: only %d wrench samples '
+                                   'so far -- waiting for more.', len(samples))
+            return
+        n = len(samples)
+        bias_fx = sum(sm[1] for sm in samples) / n
+        bias_fy = sum(sm[2] for sm in samples) / n
+        span = samples[-1][0] - samples[0][0]
+        rate = (n - 1) / span if span > 0 else 0.0
+        self._calib_samples = []
+        if math.hypot(bias_fx, bias_fy) > self._max_bias:
+            # Robot leaning on something, or the estimate is off: don't adopt
+            # it, stay CALIBRATING (no motion) and measure again.
+            rospy.logerr('[ContactProbe] Wrench bias (%.1f, %.1f)N exceeds max_wrench_bias_n='
+                         '%.1fN -- check the robot and the HaptiQuad estimate; recalibrating.',
+                         bias_fx, bias_fy, self._max_bias)
+            self._state_enter_time = rospy.Time.now()
+            return
+        self._bias = {'fx': bias_fx, 'fy': bias_fy}
+        if self._filter_win_s > 0 and rate > 0:
+            self._filter_win = max(1, int(round(rate * self._filter_win_s)))
+        for k in self._wrench_buf:   # drop pre-calibration (unbiased) samples
+            self._wrench_buf[k] = collections.deque(maxlen=self._filter_win)
+        rospy.loginfo('[ContactProbe] Calibrated: bias fx=%.2fN fy=%.2fN, wrench rate %.0fHz, '
+                      'filter window %d samples (%.0fms).', bias_fx, bias_fy, rate,
+                      self._filter_win, 1000.0 * self._filter_win / rate if rate else 0.0)
+        self._mb_client.cancel_all_goals()
+        self._enter(NORMAL_NAV)
+
+    def _near_movable(self):
+        r2 = self._movable_excl_r2
+        return any((mx - self._robot_x) ** 2 + (my - self._robot_y) ** 2 <= r2
+                   for mx, my, _ in self._movable_obstacles)
+
+    def _collision_check(self):
+        """True if an unexpected contact just halted the robot."""
+        if not self._collision_stop or self._state not in (NORMAL_NAV, SLOW_APPROACH, BACKING_UP):
+            self._collision_since = None
+            return False
+        f = math.hypot(self._avg('fx'), self._avg('fy'))
+        if self._state == BACKING_UP and self._elapsed() < self._collision_backup_grace:
+            thr = float('inf')   # contact force from the solid still decaying
+        elif self._near_movable():
+            thr = self._force_threshold_n   # pushing a MOVABLE through is expected contact
+        else:
+            thr = self._collision_thr
+        if f <= thr:
+            self._collision_since = None
+            return False
+        now = rospy.Time.now()
+        if self._collision_since is None:
+            self._collision_since = now
+            return False
+        held = (now - self._collision_since).to_sec()
+        if held < self._collision_hold:
+            return False
+        self._halt('unexpected contact in %s: |F_xy|=%.1fN > %.1fN for %.2fs'
+                   % (self._state, f, thr, held))
+        return True
+
+    def _safety_step(self):
+        """Runs every tick before the state machine; returns motion_allowed."""
+        if self._state == CALIBRATING:
+            self._calibration_step()
+            return False
+        if self._state == HALTED:
+            return False
+        if None in (self._last_wrench_t, self._last_pose_t, self._last_cloud_t) or \
+                (self._require_health and self._last_health_t is None):
+            return False   # not ready yet (startup): no motion, but nothing to halt
+        problem = self._input_problem()
+        if problem:
+            self._halt(problem)
+            return False
+        return not self._collision_check()
+
     # ── Main update loop ──────────────────────────────────────────────────────
 
     def _update_guarded(self, event):
@@ -952,8 +1215,13 @@ class ContactProbeManager:
         at whatever it last was. Log it and keep the loop alive instead."""
         try:
             self._update(event)
+            allowed = self._motion_allowed
         except Exception:
+            # Never report motion_allowed from a tick that didn't complete:
+            # a state machine raising every tick must close the gate.
+            allowed = False
             rospy.logerr_throttle(5.0, '[ContactProbe] _update raised:\n%s' % traceback.format_exc())
+        self._motion_allowed_pub.publish(Bool(data=allowed))
 
     @_synchronized
     def _update(self, _event):
@@ -961,6 +1229,10 @@ class ContactProbeManager:
         if self._last_update_wall is not None:
             self._loop_period_buf.append((now - self._last_update_wall).to_sec())
         self._last_update_wall = now
+
+        self._motion_allowed = self._safety_step()
+        if not self._motion_allowed:
+            return
 
         if not self._probing_enabled:
             # Bypass mode (haptiquad_nav_eval timing harness only, see
@@ -1157,5 +1429,5 @@ class ContactProbeManager:
 
 if __name__ == '__main__':
     rospy.init_node('contact_probe_manager')
-    ContactProbeManager()
+    ContactProbeManager().start()
     rospy.spin()

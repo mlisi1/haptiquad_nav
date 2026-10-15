@@ -50,6 +50,8 @@
   <depend>tf</depend>
   <depend>haptiquad_msgs</depend>
   <exec_depend>rospy</exec_depend>
+  <exec_depend>rostopic</exec_depend>
+  <exec_depend>roslaunch</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
 
   <export>

@@ -1,0 +1,36 @@
+# nav_supervisor.yaml -- what must be healthy before (and while) the
+# navigation core runs. See scripts/nav_supervisor.py for the check semantics.
+#
+# Rates are MINIMUMS, deliberately conservative: measure the real rates on the
+# robot (`rostopic hz`) and tighten them. A failing check names the topic and
+# the reason in /haptiquad_nav/supervisor_status and the log.
+
+preflight_stable_s: 3.0      # all checks must pass this long before the core starts
+core_startup_grace_s: 30.0   # runtime_inputs ignored this long after core start
+max_future_s: 0.2            # header stamps further ahead than this = clock offset
+report_period_s: 5.0
+
+core_launch:
+  package: haptiquad_nav
+  file: navigation_core.launch
+
+# Checked before the core starts and continuously afterwards.
+inputs:
+  - {topic: /state_estimator/anymal_state,  min_rate: 20.0, max_age: 0.3}
+  - {topic: /state_estimator/pose_in_odom,  min_rate: 20.0, max_age: 0.3, finite: true}
+  - {topic: /state_estimator/twist,         min_rate: 20.0, max_age: 0.3, finite: true}
+  - {topic: /odom,                          min_rate: 20.0, max_age: 0.3, finite: true}   # odom_bridge
+  - {topic: /slam/pose,                     min_rate: 0.5,  max_age: 2.0, finite: true}   # measure!
+  - {topic: /lidar/point_cloud,             min_rate: 5.0,  max_age: 0.5, nonempty: true}
+  - {topic: /estimated_forces,              min_rate: 20.0, max_age: 0.3, finite: true}   # HaptiQuad
+  - {topic: /anymal/base_wrench,            min_rate: 20.0, max_age: 0.3, finite: true}   # wrench_bridge
+
+# [target_frame, source_frame, max_age_s]
+transforms:
+  - [map, base, 1.0]
+  - [odom, base, 0.3]
+
+# Heartbeats of the core nodes themselves (checked after core_startup_grace_s).
+runtime_inputs:
+  - {topic: /move_base/status,               min_rate: 2.0}   # actionlib status, 5Hz
+  - {topic: /haptiquad_nav/motion_allowed,   min_rate: 5.0}   # contact_probe_manager loop

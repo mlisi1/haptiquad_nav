@@ -1,0 +1,41 @@
+# contact_probe_robot.yaml -- loaded AFTER contact_probe.yaml when
+# navigation.launch platform:=robot. Only what differs from simulation.
+#
+# NOT yet validated on hardware. Before relying on the classifier:
+#   - measure the wrench noise floor standing and walking, and the
+#     /estimated_forces rate (the calibration log line prints the rate);
+#   - re-derive contact_force_threshold_n and classification_force_threshold_n
+#     (both come from Gazebo sweeps with a generic URDF and no joint friction);
+#   - check the lidar height band and self_filter_box against real returns
+#     (rviz: /lidar/point_cloud with the base frame).
+
+# Average the standing wrench for this long after startup (robot already in
+# walk mode, no goal accepted meanwhile) and subtract it -- real drive
+# friction / model error show up as a constant base-wrench offset.
+wrench_bias_calibration_s: 5.0
+max_wrench_bias_n: 40.0
+# Filter window in time rather than samples: the sample count follows the
+# rate measured during calibration (~125ms, what 50 samples were at 400Hz).
+wrench_filter_window_s: 0.125
+
+# Lidar: heights along gravity (not the tilting base z axis), from ~0.10m
+# above the ground (base nominally ~0.55m high) so low obstacles are seen.
+# Leg/foot returns near the ground are removed by the body box instead.
+cloud_height_reference: gravity
+cloud_height_min: -0.45
+# [x_min, x_max, y_min, y_max] base frame: body + feet at full stride. Every
+# distance trigger must lie OUTSIDE it, or the obstacle vanishes from the
+# cloud exactly when it matters (probe_distance, backup_min_clearance > 0.55).
+self_filter_box: [-0.55, 0.55, -0.35, 0.35]
+slow_approach_distance: 0.90
+probe_distance: 0.70
+backup_min_clearance: 0.70
+
+# Reverse no faster than the forward probe speed; the rear is only covered
+# by the lidar sector check.
+backup_speed: 0.30
+
+# Unexpected contact outside probing halts the robot.
+collision_stop_enabled: true
+collision_force_threshold_n: 30.0
+collision_hold_time: 0.3

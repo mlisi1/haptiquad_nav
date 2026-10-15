@@ -1,0 +1,17 @@
+# global_costmap_robot.yaml -- loaded AFTER global_costmap.yaml when
+# navigation.launch platform:=robot.
+#
+# The fixed 50x50m empty map assumes the map origin is near the robot, which
+# a real SLAM map frame need not be. A rolling window centred on the robot
+# needs no map_server; goals must lie inside it (+-20m). Solid marks outside
+# the window are dropped from the costmap but kept (and re-published every
+# 2s) by contact_probe_manager, so they come back when in range.
+static_map: false
+rolling_window: true
+width: 40.0
+height: 40.0
+plugins:
+  - name: solid_obstacle_layer
+    type: costmap_2d::ObstacleLayer
+  - name: inflation_layer
+    type: costmap_2d::InflationLayer

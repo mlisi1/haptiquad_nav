@@ -67,6 +67,7 @@ catkin_install_python(PROGRAMS
   scripts/wrench_bridge.py
   scripts/odom_bridge.py
   scripts/contact_probe_manager.py
-  scripts/twist_stamper.py
+  scripts/cmd_vel_gate.py
+  scripts/nav_supervisor.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
