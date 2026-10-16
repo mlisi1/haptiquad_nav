@@ -85,6 +85,16 @@ operator and are independent of all of the above.
     floor standing and walking.
   - Check `collision_force_threshold_n` (30 N) against walking noise. If it
     is too low you get spurious HALTs; if too high, late stops.
+- Probe timing (`probe_speed` 0.4, `contact_hold_time` 0.4, `classify_time` 0.6)
+  comes from the Gazebo tuning sweep (`tuning_sweep_02`), not from hardware. For
+  the first contact tests, a slower probe is the safer start and was equally
+  accurate in that sweep: `probe_speed: 0.3` with `contact_hold_time: 0.6`
+  gave 100% SOLID accuracy for every classify/settle value. Put both in
+  `contact_probe_robot.yaml` if you want it. Below 0.3 m/s the 100 N
+  classification misses solids (force still ramping when the window closes).
+- Backing up always ends on `backup_time` in simulation (≈1.40 m from the
+  solid, target 1.60 m): the planner's `slow_down_dist` (1.5 m) is longer than
+  the backup. Expected; on the robot that also keeps the reverse slow.
 - The global costmap is a 40×40 m rolling window (no map_server), so goals
   must be within ±20 m.
 - The HaptiQuad model (`haptiquad_ros`) still uses the generic
