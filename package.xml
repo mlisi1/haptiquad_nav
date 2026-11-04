@@ -31,7 +31,7 @@
   <depend>dwa_local_planner</depend>
   <depend>rotate_recovery</depend>
   <depend>clear_costmap_recovery</depend>
-  <depend>map_server</depend>
+  <exec_depend>map_server</exec_depend>  <!-- sim only (platform:=sim); not built on the robot -->
 
   <!-- Message deps -->
   <depend>geometry_msgs</depend>

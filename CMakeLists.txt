@@ -11,7 +11,6 @@ find_package(catkin REQUIRED COMPONENTS
   navfn
   base_local_planner
   dwa_local_planner
-  map_server
   pluginlib
   roscpp
   sensor_msgs
