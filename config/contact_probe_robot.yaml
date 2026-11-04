@@ -11,7 +11,9 @@
 
 # Average the standing wrench for this long after startup (robot already in
 # walk mode, no goal accepted meanwhile) and subtract it -- real drive
-# friction / model error show up as a constant base-wrench offset.
+# friction / model error show up as a constant base-wrench offset. It is
+# constant in BASE frame (~(-7.7,-3.1)N on chamois, 2026-11-04 bags), so it
+# is stored there and rotated with the current yaw.
 wrench_bias_calibration_s: 5.0
 max_wrench_bias_n: 40.0
 # Filter window in time rather than samples: the sample count follows the

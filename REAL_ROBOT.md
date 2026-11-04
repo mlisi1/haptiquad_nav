@@ -28,7 +28,8 @@ the `haptiquad_nav_eval` sweeps; `tools/run_sweep.sh` passes all three).
 3. It then starts `navigation_core.launch`: move_base, `contact_probe_manager`,
    `cmd_vel_gate`, `goal_relay`, `debug_costmap`, and rviz if requested.
 4. `contact_probe_manager` stays in `CALIBRATING` for
-   `wrench_bias_calibration_s` (5 s): the standing base-wrench bias and the
+   `wrench_bias_calibration_s` (5 s): the standing base-wrench bias (in base
+   frame, so it stays valid after the robot turns) and the
    wrench rate are measured, and goals are rejected meanwhile. The log line
    `Calibrated: bias ... wrench rate ...` gives the numbers to check.
 

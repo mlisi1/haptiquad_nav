@@ -164,7 +164,13 @@ class ContactProbeManager:
         self._collision_backup_grace = rospy.get_param('~collision_backup_grace_s', 1.5)
         # Standing-wrench bias removal at startup (0 disables). Also measures
         # the wrench rate, so wrench_filter_window_s (if > 0) can set the
-        # filter window in seconds rather than samples.
+        # filter window in seconds rather than samples. The bias is fixed to
+        # the body (model error / drive friction), so it is averaged and
+        # stored in base-frame x/y and rotated into the world-frame wrench
+        # with the current odom->base yaw on every sample; a world-frame
+        # constant would be wrong by up to 2|bias| after a turn (hardware
+        # bags 2026-11-04: ~8N body bias, 15.6N error standing after a 160deg
+        # turn, one false contact).
         self._bias_calib_time = rospy.get_param('~wrench_bias_calibration_s', 0.0)
         self._filter_win_s    = rospy.get_param('~wrench_filter_window_s', 0.0)
         # Reset/override/injection hooks for haptiquad_nav_eval only. Off by
@@ -218,8 +224,9 @@ class ContactProbeManager:
         self._last_health_t = None
         self._health_ok     = False
         self._collision_since = None
-        self._bias = {'fx': 0.0, 'fy': 0.0}
-        self._calib_samples = []   # (t, fx, fy) while CALIBRATING
+        self._bias = {'bx': 0.0, 'by': 0.0}   # base frame
+        self._calib_samples = []   # (t, bx, by) base frame, while CALIBRATING
+        self._wrench_yaw = None    # last odom->base yaw used for the bias
         self._motion_allowed = False
         self._max_bias = rospy.get_param('~max_wrench_bias_n', 40.0)
 
@@ -457,11 +464,21 @@ class ContactProbeManager:
         if not (math.isfinite(fx) and math.isfinite(fy)):
             rospy.logwarn_throttle(2.0, '[ContactProbe] Non-finite wrench dropped.')
             return
+        calibrating = self._state == CALIBRATING
+        bx, by = self._bias['bx'], self._bias['by']
+        if calibrating or bx or by:
+            yaw = self._odom_yaw()
+            if yaw is None:
+                return   # no yaw yet: can't place the bias; counts as no wrench
+            c, s = math.cos(yaw), math.sin(yaw)
+            if calibrating:
+                self._calib_samples.append((rospy.Time.now().to_sec(),
+                                            c * fx + s * fy, -s * fx + c * fy))
+            fx -= c * bx - s * by
+            fy -= s * bx + c * by
         self._last_wrench_t = rospy.Time.now()
-        if self._state == CALIBRATING:
-            self._calib_samples.append((self._last_wrench_t.to_sec(), fx, fy))
-        self._wrench_buf['fx'].append(fx - self._bias['fx'])
-        self._wrench_buf['fy'].append(fy - self._bias['fy'])
+        self._wrench_buf['fx'].append(fx)
+        self._wrench_buf['fy'].append(fy)
         self._wrench_buf['fz'].append(w.force.z)
         self._wrench_buf['tx'].append(w.torque.x)
         self._wrench_buf['ty'].append(w.torque.y)
@@ -670,6 +687,20 @@ class ContactProbeManager:
         self._robot_yaw = yaw
 
     # ── Wrench helpers ────────────────────────────────────────────────────────
+
+    def _odom_yaw(self):
+        """Latest odom->base yaw (the HaptiQuad world frame is odom-aligned);
+        the last good value if this lookup fails, None if there never was one."""
+        try:
+            q = self._tf_buf.lookup_transform(
+                self._odom_frame, 'base', rospy.Time(0)).transform.rotation
+            self._wrench_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn_throttle(5.0, '[ContactProbe] Wrench bias: TF %s->base failed: %s',
+                                   self._odom_frame, e)
+        return self._wrench_yaw
 
     def _avg(self, key):
         buf = self._wrench_buf[key]
@@ -1127,7 +1158,7 @@ class ContactProbeManager:
         self._enter(HALTED)
 
     def _calibration_step(self):
-        """End of CALIBRATING: wrench bias = mean standing fx/fy."""
+        """End of CALIBRATING: wrench bias = mean standing fx/fy, base frame."""
         if self._elapsed() < self._bias_calib_time:
             return
         samples = self._calib_samples
@@ -1144,17 +1175,17 @@ class ContactProbeManager:
         if math.hypot(bias_fx, bias_fy) > self._max_bias:
             # Robot leaning on something, or the estimate is off: don't adopt
             # it, stay CALIBRATING (no motion) and measure again.
-            rospy.logerr('[ContactProbe] Wrench bias (%.1f, %.1f)N exceeds max_wrench_bias_n='
+            rospy.logerr('[ContactProbe] Wrench bias (%.1f, %.1f)N (base) exceeds max_wrench_bias_n='
                          '%.1fN -- check the robot and the HaptiQuad estimate; recalibrating.',
                          bias_fx, bias_fy, self._max_bias)
             self._state_enter_time = rospy.Time.now()
             return
-        self._bias = {'fx': bias_fx, 'fy': bias_fy}
+        self._bias = {'bx': bias_fx, 'by': bias_fy}
         if self._filter_win_s > 0 and rate > 0:
             self._filter_win = max(1, int(round(rate * self._filter_win_s)))
         for k in self._wrench_buf:   # drop pre-calibration (unbiased) samples
             self._wrench_buf[k] = collections.deque(maxlen=self._filter_win)
-        rospy.loginfo('[ContactProbe] Calibrated: bias fx=%.2fN fy=%.2fN, wrench rate %.0fHz, '
+        rospy.loginfo('[ContactProbe] Calibrated: bias (base frame) x=%.2fN y=%.2fN, wrench rate %.0fHz, '
                       'filter window %d samples (%.0fms).', bias_fx, bias_fy, rate,
                       self._filter_win, 1000.0 * self._filter_win / rate if rate else 0.0)
         self._mb_client.cancel_all_goals()
