@@ -61,8 +61,10 @@
         pkg="haptiquad_anymal_bringup" type="init_motion.py" output="screen"/>
 
   <!-- ── Preflight + health monitor; starts navigation_core.launch ── -->
+  <!-- clear_params: a wait_for_true_param left over from an earlier launch
+       with init_robot:=true would otherwise make it wait for walk mode forever. -->
   <node name="nav_supervisor" pkg="haptiquad_nav" type="nav_supervisor.py"
-        output="screen" required="true">
+        output="screen" required="true" clear_params="true">
     <rosparam file="$(find haptiquad_nav)/config/nav_supervisor.yaml" command="load"/>
     <param name="wait_for_true_param" value="/haptiquad_nav/motion_initialized"
            if="$(arg init_robot)"/>
