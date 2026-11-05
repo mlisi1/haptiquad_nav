@@ -34,6 +34,9 @@ self_filter_box: [-0.55, 0.55, -0.35, 0.35]
 # ~0.55 m from base at contact, so slow down from 1.20 m (0.90 m would still
 # hit at ~0.3 m/s; in simulation contact came at 0.35-0.70 m/s).
 slow_approach_distance: 1.20
+# Lidar distance to the box jittered 1.18-1.31 m at the threshold (2026-11-05
+# run 4) and toggled SLOW_APPROACH/NORMAL_NAV up to 3 times a second.
+slow_approach_exit_margin: 0.25
 probe_distance: 0.70
 backup_min_clearance: 0.70
 

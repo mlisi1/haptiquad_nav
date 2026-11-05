@@ -95,6 +95,10 @@ class ContactProbeManager:
         self._slow_speed   = rospy.get_param('~slow_approach_speed', 0.20)
         self._probe_speed  = rospy.get_param('~probe_speed', 0.05)
         self._slow_dist    = rospy.get_param('~slow_approach_distance', 1.0)
+        # Leave SLOW_APPROACH only beyond slow_dist + this margin, so lidar
+        # noise around slow_dist doesn't toggle the speed cap (hardware: up to
+        # 3 switches/s with the obstacle at 1.18-1.31 m).
+        self._slow_exit_margin = rospy.get_param('~slow_approach_exit_margin', 0.0)
         self._probe_dist   = rospy.get_param('~probe_distance', 0.65)
         self._probe_timeout = rospy.get_param('~probe_timeout', 20.0)
         self._hold_time    = rospy.get_param('~contact_hold_time', 1.0)
@@ -1545,7 +1549,7 @@ class ContactProbeManager:
                 self._enter(SLOW_APPROACH)
 
         elif state == SLOW_APPROACH:
-            if self._nearest_obs > self._slow_dist:
+            if self._nearest_obs > self._slow_dist + self._slow_exit_margin:
                 self._enter(NORMAL_NAV)
             elif (self._nearest_obs <= self._probe_dist and
                     abs(self._nearest_obs_angle) <= self._probe_heading_thr):

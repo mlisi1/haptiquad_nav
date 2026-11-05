@@ -125,7 +125,9 @@ operator and are independent of all of the above.
   that fraction of the planner's `max_vel_x` (0.6 -> 0.3 m/s); 1.0 = no cap,
   as in simulation. It is also the speed a MOVABLE object is pushed at after
   classification. Probing uses `slow_approach_speed` 0.15 / `probe_speed` 0.12
-  from `slow_approach_distance` 1.20 m.
+  from `slow_approach_distance` 1.20 m, back to cruise only beyond 1.45 m
+  (`slow_approach_exit_margin` 0.25: lidar jitter at the threshold toggled
+  the speed cap up to 3 times a second).
 - Backing up always ends on `backup_time` in simulation (≈1.40 m from the
   solid, target 1.60 m): the planner's `slow_down_dist` (1.5 m) is longer than
   the backup. Expected; on the robot that also keeps the reverse slow.

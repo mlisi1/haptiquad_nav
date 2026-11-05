@@ -194,9 +194,13 @@ class NavSupervisor:
             p = self._tf_problem(now, target, source, max_age)
             if p:
                 out.append('tf %s->%s: %s' % (target, source, p))
+        # Subscribe as soon as the core advertises, even during the grace
+        # period: subscribing only when the checks start made the first check
+        # see 'no messages for 2s' and HALT the robot 30 s after core start.
+        for c in self._runtime:
+            c.try_subscribe()
         if include_runtime:
             for c in self._runtime:
-                c.try_subscribe()
                 p = c.problem(now)
                 if p:
                     out.append('%s: %s' % (c.topic, p))
