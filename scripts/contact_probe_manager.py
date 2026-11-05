@@ -33,6 +33,7 @@ from std_msgs.msg import Bool, Float64, String
 from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
                                 PoseWithCovarianceStamped, PolygonStamped)
 from sensor_msgs.msg import PointCloud2, PointField
+from nav_msgs.msg import Odometry
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from actionlib_msgs.msg import GoalStatus
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -129,8 +130,35 @@ class ContactProbeManager:
         # Treat this as a starting point: refine using the sweep's own
         # force_vs_static_friction / confusion-matrix plots once you have data.
         self._force_threshold_n = rospy.get_param('~classification_force_threshold_n', 127.8)
-        rospy.loginfo('[ContactProbe] classification_mode=%s (force_threshold=%.1fN, settle=%.1fs)',
-                      self._classification_mode, self._force_threshold_n, self._force_settle_time)
+        # When force mode decides. 'window': once, at the end of classify_time,
+        #   on the mean force from settle_time on (the simulation/paper setting).
+        # 'event': SOLID as soon as the force (mean of the last
+        #   classification_force_avg_time) reaches the threshold; MOVABLE once,
+        #   after at least classify_time, the robot advances again at >=
+        #   classification_advance_fraction of its approach speed (and >=
+        #   classification_min_advance_speed) with the force still below it and
+        #   no longer rising (slope <= classification_max_force_rate over
+        #   classification_advance_window: a sliding object pushes back with a
+        #   roughly constant force, one still being loaded or tipped doesn't);
+        #   SOLID at classification_timeout. Needed on hardware: at slow
+        #   approach speeds the force is still rising through a fixed window
+        #   (2026-11-05 bags: the same box read 59-96N at 0.05-0.11 m/s and
+        #   118N at 0.19 m/s), so 'window' would call a slowly-approached wall
+        #   MOVABLE. Displacement mode always uses the window.
+        self._classify_decision = rospy.get_param('~classification_decision', 'window')
+        if self._classify_decision not in ('window', 'event'):
+            rospy.logwarn("[ContactProbe] Unknown classification_decision '%s' -- using 'window'.",
+                          self._classify_decision)
+            self._classify_decision = 'window'
+        self._classify_timeout  = rospy.get_param('~classification_timeout', 4.0)
+        self._force_avg_time    = rospy.get_param('~classification_force_avg_time', 0.4)
+        self._advance_fraction  = rospy.get_param('~classification_advance_fraction', 0.5)
+        self._min_advance_speed = rospy.get_param('~classification_min_advance_speed', 0.02)
+        self._advance_window    = rospy.get_param('~classification_advance_window', 1.0)
+        self._max_force_rate    = rospy.get_param('~classification_max_force_rate', 20.0)
+        rospy.loginfo('[ContactProbe] classification_mode=%s decision=%s (force_threshold=%.1fN, settle=%.1fs)',
+                      self._classification_mode, self._classify_decision,
+                      self._force_threshold_n, self._force_settle_time)
         self._backup_speed  = rospy.get_param('~backup_speed', 0.20)
         _robot_radius      = rospy.get_param('~robot_radius', 0.55)
         _inflation_radius  = rospy.get_param('~inflation_radius', 0.80)
@@ -172,6 +200,13 @@ class ContactProbeManager:
         # bags 2026-11-04: ~8N body bias, 15.6N error standing after a 160deg
         # turn, one false contact).
         self._bias_calib_time = rospy.get_param('~wrench_bias_calibration_s', 0.0)
+        # Calibration samples count only while the base is still (odometry
+        # twist below both limits); any motion restarts the calibration window.
+        # A bias averaged while walking is several N off (2026-11-05 baseline
+        # bag: (-3.8,-4.6)N vs (-7.2,-3.0)N standing -> one false contact and
+        # a 31N peak over the collision threshold).
+        self._calib_max_speed    = rospy.get_param('~calibration_max_speed', 0.02)
+        self._calib_max_yaw_rate = rospy.get_param('~calibration_max_yaw_rate', 0.05)
         self._filter_win_s    = rospy.get_param('~wrench_filter_window_s', 0.0)
         # Reset/override/injection hooks for haptiquad_nav_eval only. Off by
         # default so nothing on the robot network can disable probing or
@@ -227,6 +262,14 @@ class ContactProbeManager:
         self._bias = {'bx': 0.0, 'by': 0.0}   # base frame
         self._calib_samples = []   # (t, bx, by) base frame, while CALIBRATING
         self._wrench_yaw = None    # last odom->base yaw used for the bias
+        self._base_still = False   # from odometry twist, for CALIBRATING
+        self._last_odom_twist_t = None
+        self._last_odom_yaw = None
+        self._odom_hist = collections.deque(maxlen=80)   # (t, x, y) odom, 10Hz ticks
+        self._approach_speed = None   # odom forward speed before contact onset
+        self._classify_odom_yaw = None
+        self._classify_roll = collections.deque()   # (t, forward force) for 'event'
+        self._classify_slope_buf = collections.deque()   # same, over classification_advance_window
         self._motion_allowed = False
         self._max_bias = rospy.get_param('~max_wrench_bias_n', 40.0)
 
@@ -406,6 +449,7 @@ class ContactProbeManager:
         rospy.Subscriber('base_wrench',       WrenchStamped,              self._wrench_cb,  queue_size=1)
         rospy.Subscriber('point_cloud_in',    PointCloud2,                self._cloud_cb,   queue_size=1)
         rospy.Subscriber('/slam/pose',        PoseWithCovarianceStamped,  self._pose_cb,    queue_size=1)
+        rospy.Subscriber('odom_in',           Odometry,                   self._odom_cb,    queue_size=1)
         # Track USER goals only — internal probe/backup goals are sent via _mb_client
         # directly and must NOT overwrite _last_goal.
         rospy.Subscriber('/move_base_simple/goal', PoseStamped,           self._simple_goal_cb, queue_size=1)
@@ -464,7 +508,7 @@ class ContactProbeManager:
         if not (math.isfinite(fx) and math.isfinite(fy)):
             rospy.logwarn_throttle(2.0, '[ContactProbe] Non-finite wrench dropped.')
             return
-        calibrating = self._state == CALIBRATING
+        calibrating = self._state == CALIBRATING and self._is_still()
         bx, by = self._bias['bx'], self._bias['by']
         if calibrating or bx or by:
             yaw = self._odom_yaw()
@@ -687,6 +731,71 @@ class ContactProbeManager:
         self._robot_yaw = yaw
 
     # ── Wrench helpers ────────────────────────────────────────────────────────
+
+    def _odom_cb(self, msg):
+        tw = msg.twist.twist
+        self._last_odom_twist_t = rospy.Time.now()
+        self._base_still = (math.hypot(tw.linear.x, tw.linear.y) < self._calib_max_speed and
+                            abs(tw.angular.z) < self._calib_max_yaw_rate)
+
+    def _is_still(self):
+        """Base still per odometry received within the last 0.5 s."""
+        return (self._base_still and self._last_odom_twist_t is not None and
+                (rospy.Time.now() - self._last_odom_twist_t).to_sec() < 0.5)
+
+    def _odom_pose(self):
+        """(x, y, yaw) of base in the odom frame from TF, or None."""
+        try:
+            tr = self._tf_buf.lookup_transform(self._odom_frame, 'base', rospy.Time(0)).transform
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            return None
+        q = tr.rotation
+        return (tr.translation.x, tr.translation.y,
+                math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+
+    def _odom_fwd_speed(self, t0, t1, yaw):
+        """Mean speed along yaw between t0 and t1 from _odom_hist, or None."""
+        pts = [h for h in self._odom_hist if t0 <= h[0] <= t1]
+        if len(pts) < 2 or pts[-1][0] - pts[0][0] < 0.5 * (t1 - t0):
+            return None
+        dx, dy = pts[-1][1] - pts[0][1], pts[-1][2] - pts[0][2]
+        return (dx * math.cos(yaw) + dy * math.sin(yaw)) / (pts[-1][0] - pts[0][0])
+
+    def _event_decision(self, elapsed):
+        """classification_decision='event', called every CLASSIFYING tick.
+        Returns None (keep pushing) or (is_movable, detail)."""
+        now = rospy.Time.now().to_sec()
+        if elapsed < self._force_settle_time:
+            return None
+        f_now = self._wrench_forward_mag()
+        self._classify_roll.append((now, f_now))
+        self._classify_slope_buf.append((now, f_now))
+        while self._classify_roll and self._classify_roll[0][0] < now - self._force_avg_time:
+            self._classify_roll.popleft()
+        while self._classify_slope_buf and self._classify_slope_buf[0][0] < now - self._advance_window:
+            self._classify_slope_buf.popleft()
+        f_roll = sum(f for _, f in self._classify_roll) / len(self._classify_roll)
+        if f_roll >= self._force_threshold_n:
+            return (False, 'event: force %.1fN >= %.1fN after %.2fs'
+                    % (f_roll, self._force_threshold_n, elapsed))
+        if elapsed >= self._classify_time and self._classify_odom_yaw is not None:
+            v = self._odom_fwd_speed(now - self._advance_window, now, self._classify_odom_yaw)
+            v_app = self._approach_speed if self._approach_speed is not None else self._probe_speed
+            v_min = max(self._advance_fraction * v_app, self._min_advance_speed)
+            rate = None
+            buf = self._classify_slope_buf
+            if len(buf) >= 4 and buf[-1][0] - buf[0][0] >= 0.75 * self._advance_window:
+                tt = np.array([b[0] for b in buf]); ff = np.array([b[1] for b in buf])
+                rate = float(np.polyfit(tt - tt[0], ff, 1)[0])
+            if v is not None and v >= v_min and rate is not None and rate <= self._max_force_rate:
+                return (True, 'event: advancing %.3f m/s >= %.3f m/s (approach %.3f), force '
+                        '%.1fN < %.1fN and flat (%+.0f N/s) after %.2fs'
+                        % (v, v_min, v_app, f_roll, self._force_threshold_n, rate, elapsed))
+        if elapsed >= self._classify_timeout:
+            return (False, 'event: timeout %.1fs without advancing (force %.1fN)'
+                    % (elapsed, f_roll))
+        return None
 
     def _odom_yaw(self):
         """Latest odom->base yaw (the HaptiQuad world frame is odom-aligned);
@@ -939,6 +1048,18 @@ class ContactProbeManager:
         elif new_state == CLASSIFYING:
             self._classify_start_pos     = (self._robot_x, self._robot_y)
             self._classify_force_samples = []
+            self._classify_roll.clear()
+            self._classify_slope_buf.clear()
+            # Odom heading and approach speed for the 'event' decision: speed
+            # from 1.5 to 0.5 s before the wrench first crossed the contact
+            # threshold (_wrench_above_since, still set here) -- the last half
+            # second is already slowed by the contact itself.
+            self._classify_odom_yaw = self._last_odom_yaw
+            self._approach_speed = None
+            if self._wrench_above_since is not None and self._classify_odom_yaw is not None:
+                t_on = self._wrench_above_since.to_sec()
+                self._approach_speed = self._odom_fwd_speed(t_on - 1.5, t_on - 0.5,
+                                                            self._classify_odom_yaw)
             # Probe goal stays active; speed_limit stays at probe_speed.
 
         elif new_state == BACKING_UP:
@@ -1159,6 +1280,13 @@ class ContactProbeManager:
 
     def _calibration_step(self):
         """End of CALIBRATING: wrench bias = mean standing fx/fy, base frame."""
+        if not self._is_still():
+            rospy.logwarn_throttle(5.0, '[ContactProbe] Calibration: %s -- waiting.' % (
+                'no odometry on odom_in' if self._last_odom_twist_t is None
+                else 'base is moving or odometry is stale'))
+            self._calib_samples = []
+            self._state_enter_time = rospy.Time.now()
+            return
         if self._elapsed() < self._bias_calib_time:
             return
         samples = self._calib_samples
@@ -1282,6 +1410,14 @@ class ContactProbeManager:
         self._nearest_rear_obs_pub.publish(Float64(data=self._nearest_rear_obs))
 
         state = self._state
+        # Every active tick (not only while probing): the 'event' decision
+        # needs the approach speed from before contact, and contact often
+        # comes right as CONTACT_PROBE starts.
+        if self._classify_decision == 'event':
+            op = self._odom_pose()
+            if op is not None:
+                self._odom_hist.append((now.to_sec(), op[0], op[1]))
+                self._last_odom_yaw = op[2]
 
         if state == NORMAL_NAV:
             # Goal watchdog: if move_base aborted the goal we just resent, try again.
@@ -1358,7 +1494,11 @@ class ContactProbeManager:
             if elapsed >= self._force_settle_time:
                 self._classify_force_samples.append(self._wrench_forward_mag())
 
-            if elapsed >= self._classify_time:
+            event = None
+            if self._classification_mode == 'force' and self._classify_decision == 'event':
+                event = self._event_decision(elapsed)
+            if event is not None or (elapsed >= self._classify_time and not (
+                    self._classification_mode == 'force' and self._classify_decision == 'event')):
                 dx = self._robot_x - self._classify_start_pos[0]
                 dy = self._robot_y - self._classify_start_pos[1]
                 forward = (dx * math.cos(self._probe_entry_yaw) +
@@ -1374,7 +1514,9 @@ class ContactProbeManager:
                 # always computed and logged so a run's classify_time samples one
                 # criterion while the other is still visible for offline comparison,
                 # but only the selected one drives the MOVABLE/SOLID decision.
-                if self._classification_mode == 'force':
+                if event is not None:
+                    is_movable, decision_detail = event
+                elif self._classification_mode == 'force':
                     is_movable = w_settled < self._force_threshold_n
                     decision_detail = 'force-mode: w_settled=%.1fN vs thr=%.1fN' % (
                         w_settled, self._force_threshold_n)

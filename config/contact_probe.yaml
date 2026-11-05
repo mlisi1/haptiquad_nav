@@ -128,6 +128,19 @@ classification_force_settle_time: 0.2
 # the robot model changes -- the saturation ceiling is a property of those,
 # not a universal constant.
 classification_force_threshold_n: 100.0
+# When force mode decides (see contact_probe_manager.py): 'window' = once at
+# the end of classify_time (simulation / paper runs); 'event' = SOLID as soon as
+# the force reaches the threshold, MOVABLE once the robot advances again below
+# it, SOLID at classification_timeout. contact_probe_robot.yaml selects 'event'.
+classification_decision: window
+classification_timeout: 4.0             # [s] 'event' only: no breakaway by then -> SOLID
+classification_force_avg_time: 0.4      # [s] 'event' only: force averaged over this (the window's 0.2-0.6 s span)
+classification_advance_fraction: 0.5    # 'event' only: MOVABLE needs >= this x approach speed
+classification_min_advance_speed: 0.02  # [m/s] 'event' only: floor for the above
+classification_advance_window: 1.0      # [s] 'event' only: speed and force slope over this
+classification_max_force_rate: 20.0     # [N/s] 'event' only: MOVABLE needs the force no longer rising
+calibration_max_speed: 0.02             # [m/s] bias calibration only counts while slower
+calibration_max_yaw_rate: 0.05          # [rad/s] ... and turning slower than this
 
 # ── Back-up after SOLID detection ─────────────────────────────────
 # After classifying an obstacle as SOLID, the robot reverses briefly so

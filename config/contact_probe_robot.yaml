@@ -39,5 +39,12 @@ backup_speed: 0.30
 
 # Unexpected contact outside probing halts the robot.
 collision_stop_enabled: true
-collision_force_threshold_n: 30.0
+# Walking at 0.4-0.6 m/s peaked at 27.8N (2026-11-05 baseline bag, correct
+# bias): 30N left 2N of margin.
+collision_force_threshold_n: 40.0
 collision_hold_time: 0.3
+
+# At slow approach speeds the contact force is still rising through a fixed
+# classify window (2026-11-05: same box 59-96N at 0.05-0.11 m/s, 118N at
+# 0.19 m/s), so decide on events instead -- see contact_probe.yaml.
+classification_decision: event

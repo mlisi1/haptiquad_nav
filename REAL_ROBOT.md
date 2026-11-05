@@ -30,8 +30,11 @@ the `haptiquad_nav_eval` sweeps; `tools/run_sweep.sh` passes all three).
 4. `contact_probe_manager` stays in `CALIBRATING` for
    `wrench_bias_calibration_s` (5 s): the standing base-wrench bias (in base
    frame, so it stays valid after the robot turns) and the
-   wrench rate are measured, and goals are rejected meanwhile. The log line
-   `Calibrated: bias ... wrench rate ...` gives the numbers to check.
+   wrench rate are measured, and goals are rejected meanwhile. Samples only
+   count while `/odom` says the base is still (`calibration_max_speed`,
+   `calibration_max_yaw_rate`); moving it, e.g. with the joystick, restarts
+   the 5 s. The log line `Calibrated: bias ... wrench rate ...` gives the
+   numbers to check.
 
 ## What stops the robot
 
@@ -84,8 +87,8 @@ operator and are independent of all of the above.
     `classification_force_threshold_n` (100 N). Both come from Gazebo with
     a generic URDF and no joint friction. First record the wrench noise
     floor standing and walking.
-  - Check `collision_force_threshold_n` (30 N) against walking noise. If it
-    is too low you get spurious HALTs; if too high, late stops.
+  - `collision_force_threshold_n` is 40 N on the robot: walking at 0.4-0.6 m/s
+    peaked at 27.8 N in the 2026-11-05 bags, 2 N under the old 30 N.
 - Probe timing (`probe_speed` 0.4, `contact_hold_time` 0.4, `classify_time` 0.6)
   comes from the Gazebo tuning sweep (`tuning_sweep_02`), not from hardware. For
   the first contact tests, a slower probe is the safer start and was equally
@@ -93,6 +96,14 @@ operator and are independent of all of the above.
   gave 100% SOLID accuracy for every classify/settle value. Put both in
   `contact_probe_robot.yaml` if you want it. Below 0.3 m/s the 100 N
   classification misses solids (force still ramping when the window closes).
+  On hardware that showed at 0.05-0.2 m/s (2026-11-05: the same box read
+  59-118 N in the window depending on speed), so the robot config sets
+  `classification_decision: event`: SOLID as soon as the force reaches the
+  threshold, MOVABLE only once the robot advances again (>= half its approach
+  speed) with the force below the threshold and no longer rising, SOLID after
+  `classification_timeout` (4 s). Replayed on those bags it gives SOLID for
+  all four pushes at any speed, and MOVABLE for a light sliding object under
+  real walking noise. Simulation keeps `window`, as in the paper runs.
 - Backing up always ends on `backup_time` in simulation (≈1.40 m from the
   solid, target 1.60 m): the planner's `slow_down_dist` (1.5 m) is longer than
   the backup. Expected; on the robot that also keeps the reverse slow.

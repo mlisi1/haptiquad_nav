@@ -74,6 +74,7 @@
     <param name="eval_mode" value="$(arg eval_mode)"/>
     <remap from="base_wrench"    to="$(arg wrench_topic)"/>
     <remap from="point_cloud_in" to="$(arg pointcloud_topic)"/>
+    <remap from="odom_in"        to="/odom"/>
   </node>
 
   <!-- ── Relay ANYmal RViz /goal → /move_base_simple/goal ─────── -->
