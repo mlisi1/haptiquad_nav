@@ -59,3 +59,9 @@ collision_hold_time: 0.3
 # classify window (2026-11-05: same box 59-96N at 0.05-0.11 m/s, 118N at
 # 0.19 m/s), so decide on events instead -- see contact_probe.yaml.
 classification_decision: event
+
+# Hardware reference pushes (2026-11-05 run 3, ~0.12 m/s): a 27 kg box sliding
+# on wood peaked at 101-111N (0.4 s mean, breakaway) and slid at 75-94N; a wall
+# plateaued at 152-159N (push limit). 130N sits ~20N from both. Tall objects
+# that tip at 115-130N (same box on the bare floor) come out MOVABLE.
+classification_force_threshold_n: 130.0
