@@ -29,12 +29,23 @@ cloud_height_min: -0.45
 # distance trigger must lie OUTSIDE it, or the obstacle vanishes from the
 # cloud exactly when it matters (probe_distance, backup_min_clearance > 0.55).
 self_filter_box: [-0.55, 0.55, -0.35, 0.35]
-slow_approach_distance: 0.90
+# The robot brakes at ~0.5-0.8 m/s^2 (2026-11-05 bags): from 0.6 m/s to
+# 0.15 m/s takes ~0.35 m plus ~0.1 m of command latency, and the box face is
+# ~0.55 m from base at contact, so slow down from 1.20 m (0.90 m would still
+# hit at ~0.3 m/s; in simulation contact came at 0.35-0.70 m/s).
+slow_approach_distance: 1.20
 probe_distance: 0.70
 backup_min_clearance: 0.70
 
-# Reverse no faster than the forward probe speed; the rear is only covered
-# by the lidar sector check.
+# Contact speed on hardware: manual pushes at 0.05-0.19 m/s already peaked at
+# 149-168N on the front face. With classification_decision: event a slow probe
+# only costs ~1 s. Keep probe_speed <= slow_approach_speed, or the robot speeds
+# up again inside probe_distance.
+slow_approach_speed: 0.15
+probe_speed: 0.12
+
+# Reversing away from the contact; the rear is covered by the lidar sector
+# check (backup_min_clearance).
 backup_speed: 0.30
 
 # Unexpected contact outside probing halts the robot.
