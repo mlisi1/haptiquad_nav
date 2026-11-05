@@ -126,6 +126,23 @@ rosrun haptiquad_nav send_goal_ahead.py 3 -1       # 3 m ahead, 1 m to the right
 rosrun haptiquad_nav send_goal_ahead.py 2 --dry-run
 ```
 
+It prints each step (master, `odom -> base` transform, subscribers) and
+waits for `contact_probe_manager` to confirm the goal on `mission_event`:
+exit 0 means the mission started, 1 means it could not send (the message
+says why), 2 means it was sent but not accepted (calibrating or HALTED).
+Run it where the workspace is sourced and `/tf` is reachable.
+
+rviz goals reach `/move_base_simple/goal` through `goal_relay.py`. The
+`topic_tools/relay` used before advertised its output only on the first
+message and lost it, so the first click after every launch was ignored.
+
+A goal ends when the robot is within `xy_goal_tolerance` (0.15 m) and
+`yaw_goal_tolerance` (0.10 rad). Up to `dd96d7b` the planner's
+goal-reached flag was cleared by every new global plan (10 Hz, the controller
+rate), so the robot often stood inside the tolerance with zero velocity and
+the goal still active. It is now checked from the current pose. This is C++:
+rebuild (`catkin_make --pkg haptiquad_nav`).
+
 For a SOLID trial put the goal well past the obstacle and to one side: a goal
 within about 1.4 m of the contact face (box depth 0.5 m + inflation 0.8 m)
 has no plan.

@@ -19,12 +19,14 @@ map in simulation) unless --frame is given.
 """
 import argparse
 import math
+import os
 import sys
 
 import rospy
 import tf.transformations as tft
 import tf2_ros
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import String
 
 
 def main():
@@ -41,16 +43,19 @@ def main():
     ap.add_argument('--dry-run', action='store_true', help='print the goal without sending it')
     args = ap.parse_args(rospy.myargv(sys.argv)[1:])
 
+    print('connecting to the ROS master at %s ...' % os.environ.get('ROS_MASTER_URI', '(ROS_MASTER_URI unset)'))
     rospy.init_node('send_goal_ahead', anonymous=True)
     frame = args.frame or rospy.get_param('/contact_probe_manager/nav_frame', 'odom')
 
     buf = tf2_ros.Buffer()
-    tf2_ros.TransformListener(buf)
+    listener = tf2_ros.TransformListener(buf)   # keep a reference: it owns the /tf subscribers
+    print('waiting for the %s -> %s transform ...' % (frame, args.base))
     try:
-        tr = buf.lookup_transform(frame, args.base, rospy.Time(0), rospy.Duration(3.0))
+        tr = buf.lookup_transform(frame, args.base, rospy.Time(0), rospy.Duration(5.0))
     except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException) as e:
-        rospy.logerr('No %s -> %s transform: %s', frame, args.base, e)
+        print('ERROR: no %s -> %s transform after 5 s: %s' % (frame, args.base, e))
+        print('       is /tf reaching this machine? try: rosrun tf tf_echo %s %s' % (frame, args.base))
         sys.exit(1)
     t, q = tr.transform.translation, tr.transform.rotation
     _, _, yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
@@ -72,20 +77,40 @@ def main():
     if args.dry_run:
         return
 
+    # contact_probe_manager confirms every goal it accepts on this latched
+    # topic; the latched message already there is from an earlier goal.
+    want = 'goal (%.2f, %.2f)' % (goal.pose.position.x, goal.pose.position.y)
+    accepted = []
+    rospy.Subscriber('/haptiquad_nav/mission_event', String,
+                     lambda m: accepted.append(m.data) if m.data.endswith(want) else None)
+
     pub = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size=1)
     # A message published before the subscribers connect is lost: wait for
     # move_base and contact_probe_manager (both subscribe to this topic).
-    deadline = rospy.Time.now() + rospy.Duration(3.0)
+    print('waiting for move_base and contact_probe_manager to connect ...')
+    deadline = rospy.Time.now() + rospy.Duration(5.0)
     while pub.get_num_connections() < 2 and rospy.Time.now() < deadline and not rospy.is_shutdown():
         rospy.sleep(0.05)
-    if pub.get_num_connections() == 0:
-        rospy.logerr('Nobody subscribes to /move_base_simple/goal -- is the navigation core running?')
-        sys.exit(1)
     n = pub.get_num_connections()
+    if n == 0:
+        print('ERROR: nobody subscribes to /move_base_simple/goal -- is the navigation core running?')
+        sys.exit(1)
+    if n < 2:
+        print('WARNING: only %d subscriber(s) connected (expected move_base and '
+              'contact_probe_manager); sending anyway' % n)
     goal.header.stamp = rospy.Time.now()
     pub.publish(goal)
-    rospy.sleep(0.3)   # let the message go out before the node exits
     print('sent to /move_base_simple/goal (%d subscribers)' % n)
+
+    deadline = rospy.Time.now() + rospy.Duration(3.0)
+    while not accepted and rospy.Time.now() < deadline and not rospy.is_shutdown():
+        rospy.sleep(0.05)
+    if accepted:
+        print('contact_probe_manager accepted the goal: mission started')
+    else:
+        print('WARNING: contact_probe_manager did not confirm the goal within 3 s '
+              '(check its log: calibrating or HALTED?)')
+        sys.exit(2)
 
 
 if __name__ == '__main__':

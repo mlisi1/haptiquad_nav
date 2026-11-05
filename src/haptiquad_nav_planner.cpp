@@ -12,7 +12,7 @@ PLUGINLIB_EXPORT_CLASS(haptiquad_nav::HaptiQuadNavPlanner,
 namespace haptiquad_nav {
 
 HaptiQuadNavPlanner::HaptiQuadNavPlanner()
-    : initialized_(false), goal_reached_(false), tf_(nullptr), costmap_(nullptr),
+    : initialized_(false), tf_(nullptr), costmap_(nullptr),
       speed_limit_(std::numeric_limits<double>::infinity())
 {}
 
@@ -62,8 +62,7 @@ bool HaptiQuadNavPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>&
         ROS_ERROR("[HaptiQuadNavPlanner] Not initialized");
         return false;
     }
-    plan_         = plan;
-    goal_reached_ = false;
+    plan_ = plan;
     return true;
 }
 
@@ -84,17 +83,11 @@ bool HaptiQuadNavPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     const double ry   = robot_pose.pose.position.y;
     const double ryaw = tf2::getYaw(robot_pose.pose.orientation);
 
-    // Distance to goal — used for goal check and speed scaling
-    const double gx        = plan_.back().pose.position.x;
-    const double gy        = plan_.back().pose.position.y;
-    const double goal_dist = std::hypot(gx - rx, gy - ry);
-    const double goal_dyaw = std::abs(angles::shortest_angular_distance(
-        ryaw, tf2::getYaw(plan_.back().pose.orientation)));
+    if (inGoalTolerance(rx, ry, ryaw)) return true;   // zero twist; isGoalReached() ends the goal
 
-    if (goal_dist < xy_goal_tolerance_ && goal_dyaw < yaw_goal_tolerance_) {
-        goal_reached_ = true;
-        return true;
-    }
+    // Distance to goal — used for speed scaling
+    const double goal_dist = std::hypot(plan_.back().pose.position.x - rx,
+                                        plan_.back().pose.position.y - ry);
 
     // Find closest plan point to current robot position
     int closest_idx = 0;
@@ -167,9 +160,28 @@ bool HaptiQuadNavPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
     return true;
 }
 
+bool HaptiQuadNavPlanner::inGoalTolerance(double rx, double ry, double ryaw) const
+{
+    if (plan_.empty()) return false;
+    const geometry_msgs::Pose& g = plan_.back().pose;
+    return std::hypot(g.position.x - rx, g.position.y - ry) < xy_goal_tolerance_
+        && std::abs(angles::shortest_angular_distance(ryaw, tf2::getYaw(g.orientation)))
+               < yaw_goal_tolerance_;
+}
+
 bool HaptiQuadNavPlanner::isGoalReached()
 {
-    return goal_reached_;
+    // Checked from the current pose, not from a flag set in
+    // computeVelocityCommands() and cleared in setPlan(): move_base hands over
+    // a fresh plan on every planner cycle (10 Hz, as fast as the controller),
+    // so the flag was cleared again before move_base read it. The robot then
+    // stood inside the tolerance with zero velocity and the goal never ended
+    // (hardware run 6: 0.12-0.14 m from the goal for up to 25 s).
+    if (!initialized_) return false;
+    geometry_msgs::PoseStamped robot_pose;
+    if (!costmap_->getRobotPose(robot_pose)) return false;
+    return inGoalTolerance(robot_pose.pose.position.x, robot_pose.pose.position.y,
+                           tf2::getYaw(robot_pose.pose.orientation));
 }
 
 }  // namespace haptiquad_nav

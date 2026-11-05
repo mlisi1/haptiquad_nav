@@ -69,5 +69,6 @@ catkin_install_python(PROGRAMS
   scripts/cmd_vel_gate.py
   scripts/nav_supervisor.py
   scripts/send_goal_ahead.py
+  scripts/goal_relay.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

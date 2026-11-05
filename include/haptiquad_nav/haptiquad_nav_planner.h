@@ -27,9 +27,10 @@ public:
 
 private:
     void speedLimitCb(const std_msgs::Float64::ConstPtr& msg);
+    // True if the robot pose is within the xy and yaw tolerance of the plan's end.
+    bool inGoalTolerance(double rx, double ry, double ryaw) const;
 
     bool initialized_;
-    bool goal_reached_;
 
     tf2_ros::Buffer*            tf_;
     costmap_2d::Costmap2DROS*   costmap_;

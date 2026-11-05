@@ -86,9 +86,13 @@
 
   <!-- ── Relay ANYmal RViz /goal → /move_base_simple/goal ─────── -->
   <!-- The ANYmal RViz config publishes 2D Nav Goal to /goal, not the
-       move_base default /move_base_simple/goal. This relay bridges them. -->
-  <node pkg="topic_tools" type="relay" name="goal_relay"
-        args="/goal /move_base_simple/goal"/>
+       move_base default /move_base_simple/goal. This relay bridges them.
+       Not topic_tools/relay: it advertises on the first message and loses
+       it, so the first goal after each launch was ignored. -->
+  <node pkg="haptiquad_nav" type="goal_relay.py" name="goal_relay">
+    <remap from="in"  to="/goal"/>
+    <remap from="out" to="/move_base_simple/goal"/>
+  </node>
 
   <!-- ── Debug perception costmap (visualization only) ─────────── -->
   <!-- Rolling 20×20 m OccupancyGrid built directly from the raw 3D lidar
