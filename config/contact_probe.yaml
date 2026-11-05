@@ -141,6 +141,13 @@ classification_advance_window: 1.0      # [s] 'event' only: speed and force slop
 classification_max_force_rate: 20.0     # [N/s] 'event' only: MOVABLE needs the force no longer rising
 calibration_max_speed: 0.02             # [m/s] bias calibration only counts while slower
 calibration_max_yaw_rate: 0.05          # [rad/s] ... and turning slower than this
+# Operator takeover (see contact_probe_manager.py): a joystick command beyond
+# the deadband during a mission aborts it cleanly. Off in simulation.
+operator_override_enabled: false
+operator_twist_topic: /joy_manager/twist   # joy_manager's twist into twist_mux (top priority)
+operator_deadband_linear: 0.05          # [m/s]
+operator_deadband_angular: 0.10         # [rad/s]
+operator_hold_time: 1.0                 # [s] gate stays closed this long after the last stick command
 
 # ── Back-up after SOLID detection ─────────────────────────────────
 # After classifying an obstacle as SOLID, the robot reverses briefly so

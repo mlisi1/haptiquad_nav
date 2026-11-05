@@ -28,7 +28,8 @@ core=(/state_estimator/anymal_state /estimated_forces /tf /tf_static /diagnostic
 haptiquad=("${core[@]}" /residuals /residual_errors)
 push=("${core[@]}" /lidar/point_cloud /twist_mux/twist /odom)
 nav=("${push[@]}" /slam/pose /anymal/base_wrench /rosout
-     /haptiquad_nav/state /haptiquad_nav/speed_limit
+     /haptiquad_nav/state /haptiquad_nav/mission_event /joy_manager/twist
+     /haptiquad_nav/speed_limit
      /haptiquad_nav/motion_allowed /haptiquad_nav/halt_reason
      /haptiquad_nav/health /haptiquad_nav/supervisor_status
      /haptiquad_nav/solid_obstacles /haptiquad_nav/movable_obstacles

@@ -31,10 +31,11 @@ import actionlib
 
 from std_msgs.msg import Bool, Float64, String
 from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
-                                PoseWithCovarianceStamped, PolygonStamped)
+                                PoseWithCovarianceStamped, PolygonStamped,
+                                Twist, TwistStamped)
 from sensor_msgs.msg import PointCloud2, PointField
 from nav_msgs.msg import Odometry
-from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseActionResult
 from actionlib_msgs.msg import GoalStatus
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
@@ -160,6 +161,19 @@ class ContactProbeManager:
                       self._classification_mode, self._classify_decision,
                       self._force_threshold_n, self._force_settle_time)
         self._backup_speed  = rospy.get_param('~backup_speed', 0.20)
+        # Operator takeover (robot only): a manual joystick command beyond the
+        # deadband during a mission (a user goal not yet reached) aborts it:
+        # all move_base goals cancelled, the user goal forgotten (not
+        # replayed), probing state dropped (a SOLID already decided during
+        # BACKING_UP keeps its mark), back to NORMAL_NAV; motion_allowed stays
+        # False while the stick is in use and for operator_hold_time after.
+        # Outside a mission joystick use is ignored, and so is the collision
+        # stop, so repositioning the robot never aborts or HALTs anything.
+        self._op_enabled  = rospy.get_param('~operator_override_enabled', False)
+        self._op_topic    = rospy.get_param('~operator_twist_topic', '/joy_manager/twist')
+        self._op_db_lin   = rospy.get_param('~operator_deadband_linear', 0.05)
+        self._op_db_ang   = rospy.get_param('~operator_deadband_angular', 0.10)
+        self._op_hold     = rospy.get_param('~operator_hold_time', 1.0)
         # NORMAL_NAV cap: normal_speed_fraction x the planner's max_vel_x
         # (read from its own parameter); >= 1 means no cap (speed_limit=inf).
         frac = rospy.get_param('~normal_speed_fraction', 1.0)
@@ -273,6 +287,10 @@ class ContactProbeManager:
         self._base_still = False   # from odometry twist, for CALIBRATING
         self._last_odom_twist_t = None
         self._last_odom_yaw = None
+        self._op_active_until = None      # rospy.Time: joystick in use until then
+        self._op_abort_pending = False
+        self._mission_active = False      # user goal received and not yet reached
+        self._probe_exit_t = None         # last exit from CONTACT_PROBE/CLASSIFYING/BACKING_UP
         self._odom_hist = collections.deque(maxlen=80)   # (t, x, y) odom, 10Hz ticks
         self._approach_speed = None   # odom forward speed before contact onset
         self._classify_odom_yaw = None
@@ -357,6 +375,9 @@ class ContactProbeManager:
         # the state machine's own logic.
         self._state_pub = rospy.Publisher(
             '/haptiquad_nav/state', String, queue_size=1, latch=True)
+        # Mission log: goal received / reached / aborted by the operator.
+        self._mission_event_pub = rospy.Publisher(
+            '/haptiquad_nav/mission_event', String, queue_size=10, latch=True)
         self._diag_pub = rospy.Publisher(
             '/diagnostics', DiagnosticArray, queue_size=1)
         # Safety-margin telemetry: distance to nearest confirmed-unknown
@@ -458,6 +479,11 @@ class ContactProbeManager:
         rospy.Subscriber('point_cloud_in',    PointCloud2,                self._cloud_cb,   queue_size=1)
         rospy.Subscriber('/slam/pose',        PoseWithCovarianceStamped,  self._pose_cb,    queue_size=1)
         rospy.Subscriber('odom_in',           Odometry,                   self._odom_cb,    queue_size=1)
+        if self._op_enabled:
+            rospy.Subscriber(self._op_topic, rospy.AnyMsg, self._operator_twist_cb, queue_size=10)
+            rospy.Subscriber('/move_base/result', MoveBaseActionResult,
+                             self._mb_result_cb, queue_size=10)
+            rospy.loginfo('[ContactProbe] Operator takeover watch on %s', self._op_topic)
         # Track USER goals only — internal probe/backup goals are sent via _mb_client
         # directly and must NOT overwrite _last_goal.
         rospy.Subscriber('/move_base_simple/goal', PoseStamped,           self._simple_goal_cb, queue_size=1)
@@ -506,8 +532,10 @@ class ContactProbeManager:
         goal = MoveBaseGoal()
         goal.target_pose = msg
         self._last_goal = goal
+        self._mission_active = True
         rospy.loginfo('[ContactProbe] User goal: (%.2f, %.2f)',
                       msg.pose.position.x, msg.pose.position.y)
+        self._mission_event('goal (%.2f, %.2f)' % (msg.pose.position.x, msg.pose.position.y))
 
     @_synchronized
     def _wrench_cb(self, msg):
@@ -739,6 +767,72 @@ class ContactProbeManager:
         self._robot_yaw = yaw
 
     # ── Wrench helpers ────────────────────────────────────────────────────────
+
+    def _mission_event(self, text):
+        self._mission_event_pub.publish(String(data='%.2f %s' % (rospy.Time.now().to_sec(), text)))
+
+    def _operator_twist_cb(self, msg):
+        """Joystick twist (Twist or TwistStamped). Beyond the deadband it
+        marks the joystick in use and, during a mission, requests an abort
+        (carried out by the next _update tick)."""
+        try:
+            stamped = msg._connection_header.get('type', '').endswith('TwistStamped')
+            m = TwistStamped() if stamped else Twist()
+            m.deserialize(msg._buff)
+            tw = m.twist if stamped else m
+        except Exception as e:
+            rospy.logwarn_throttle(10.0, '[ContactProbe] Cannot read %s: %s', self._op_topic, e)
+            return
+        if (abs(tw.linear.x) <= self._op_db_lin and abs(tw.linear.y) <= self._op_db_lin and
+                abs(tw.angular.z) <= self._op_db_ang):
+            return
+        self._op_active_until = rospy.Time.now() + rospy.Duration(self._op_hold)
+        if self._mission_active and not self._op_abort_pending:
+            self._op_abort_pending = True
+
+    @_synchronized
+    def _mb_result_cb(self, msg):
+        """Mission ends when move_base reaches the user goal: a SUCCEEDED
+        result in NORMAL_NAV or SLOW_APPROACH (probe/backup goals finish in
+        their own states; results within 1 s of leaving them are skipped as
+        late probe/backup results)."""
+        late = (self._probe_exit_t is not None and
+                (rospy.Time.now() - self._probe_exit_t).to_sec() < 1.0)
+        if (msg.status.status == GoalStatus.SUCCEEDED and self._mission_active and
+                self._state in (NORMAL_NAV, SLOW_APPROACH) and not late):
+            self._mission_active = False
+            self._last_goal = None
+            rospy.loginfo('[ContactProbe] Goal reached -- mission complete.')
+            self._mission_event('goal reached')
+
+    def _operator_abort(self):
+        """Operator took over during a mission: drop it cleanly."""
+        self._op_abort_pending = False
+        if not self._mission_active:
+            return
+        state = self._state
+        g = self._last_goal.target_pose.pose.position if self._last_goal is not None else None
+        rospy.logwarn('[ContactProbe] OPERATOR TAKEOVER in %s -- mission aborted%s. '
+                      'Send a new goal to continue.', state,
+                      ' (goal %.2f, %.2f)' % (g.x, g.y) if g is not None else '')
+        self._mb_client.cancel_all_goals()   # also cancels goals move_base got directly
+        self._mission_active = False
+        self._last_goal = None
+        if state == BACKING_UP:
+            self._refine_last_solid()        # the SOLID decision stands
+        if state in (CONTACT_PROBE, CLASSIFYING, BACKING_UP, SLOW_APPROACH):
+            self._enter(NORMAL_NAV)          # _send_goal() is a no-op without a goal
+        self._goal_needs_resend = False
+        self._wrench_above_since = None
+        self._classify_force_samples = []
+        self._classify_roll.clear()
+        self._classify_slope_buf.clear()
+        self._collision_since = None
+        self._mission_event('aborted by operator in %s' % state)
+
+    def _operator_in_control(self):
+        return (self._op_enabled and self._op_active_until is not None and
+                rospy.Time.now() < self._op_active_until)
 
     def _odom_cb(self, msg):
         tw = msg.twist.twist
@@ -1026,6 +1120,8 @@ class ContactProbeManager:
         self._state = new_state
         self._state_enter_time = rospy.Time.now()
         self._state_pub.publish(String(data=new_state))
+        if prev_state in (CONTACT_PROBE, CLASSIFYING, BACKING_UP):
+            self._probe_exit_t = self._state_enter_time
 
         if new_state == NORMAL_NAV:
             self._set_speed_limit(self._normal_speed)
@@ -1102,6 +1198,7 @@ class ContactProbeManager:
         self._wrench_above_since = None
         self._goal_needs_resend = False
         self._last_goal = None
+        self._mission_active = False
         self._backup_cooldown_until = rospy.Time(0)
         self._contact_point = None
         self._state = NORMAL_NAV
@@ -1334,7 +1431,8 @@ class ContactProbeManager:
 
     def _collision_check(self):
         """True if an unexpected contact just halted the robot."""
-        if not self._collision_stop or self._state not in (NORMAL_NAV, SLOW_APPROACH, BACKING_UP):
+        if not self._collision_stop or self._state not in (NORMAL_NAV, SLOW_APPROACH, BACKING_UP) \
+                or (self._op_enabled and not self._mission_active):
             self._collision_since = None
             return False
         f = math.hypot(self._avg('fx'), self._avg('fy'))
@@ -1365,6 +1463,8 @@ class ContactProbeManager:
             return False
         if self._state == HALTED:
             return False
+        if self._operator_in_control():
+            return False   # joystick in use: gate closed, state machine paused
         if None in (self._last_wrench_t, self._last_pose_t, self._last_cloud_t) or \
                 (self._require_health and self._last_health_t is None):
             return False   # not ready yet (startup): no motion, but nothing to halt
@@ -1397,6 +1497,8 @@ class ContactProbeManager:
             self._loop_period_buf.append((now - self._last_update_wall).to_sec())
         self._last_update_wall = now
 
+        if self._op_abort_pending:
+            self._operator_abort()
         self._motion_allowed = self._safety_step()
         if not self._motion_allowed:
             return

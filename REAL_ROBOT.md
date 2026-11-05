@@ -44,7 +44,7 @@ command only while all of these hold:
 | Condition | Source |
 |---|---|
 | `/haptiquad_nav/health` is fresh and True | `nav_supervisor`: all inputs keep passing the preflight checks; move_base status and the probe manager heartbeat are alive |
-| `/haptiquad_nav/motion_allowed` is fresh and True | `contact_probe_manager`: calibrated, not HALTED, its own wrench/pose/cloud inputs fresh |
+| `/haptiquad_nav/motion_allowed` is fresh and True | `contact_probe_manager`: calibrated, not HALTED, joystick not in use, its own wrench/pose/cloud inputs fresh |
 | `/odom` is fresh | needed for stuck detection |
 | no latched fault | stuck controller, or a non-finite command |
 
@@ -54,10 +54,27 @@ If the gate itself dies, nothing is published and twist_mux times out.
 `contact_probe_manager` goes to **HALTED** in these cases:
 - an input goes stale;
 - the supervisor reports a problem;
-- unexpected contact (`|F_xy|` > `collision_force_threshold_n` for
-  `collision_hold_time` while not probing; the threshold is
+- unexpected contact during a mission (`|F_xy|` > `collision_force_threshold_n`
+  for `collision_hold_time` while not probing; the threshold is
   `classification_force_threshold_n` while pushing a known movable);
 - `cmd_vel_gate` reports a fault.
+
+**Operator takeover** (`operator_override_enabled`, on for the robot): moving
+the radio joystick (`/joy_manager/twist`, beyond `operator_deadband_*`) during
+a mission, i.e. from a user goal until move_base reports it reached, aborts
+the mission without restarting anything:
+- every move_base goal is cancelled and the user goal is forgotten (not
+  replayed); a probe or classification in progress is dropped, a SOLID
+  already decided during BACKING_UP keeps its costmap mark;
+- the state machine returns to NORMAL_NAV and `motion_allowed` stays False
+  while the stick is in use and for `operator_hold_time` (1 s) after, so the
+  gate sends nothing;
+- it is logged (`OPERATOR TAKEOVER in <state>`) and published on the latched
+  `/haptiquad_nav/mission_event` (also `goal (x, y)` and `goal reached`).
+
+Send a new goal to continue. Between missions the joystick only closes the
+gate while in use, and the collision stop is off, so repositioning the robot
+by hand never aborts or HALTs anything.
 
 HALTED cancels all goals and sets `speed_limit=0`. The reason is on
 `/haptiquad_nav/halt_reason` (latched). Only a new goal resumes navigation,
