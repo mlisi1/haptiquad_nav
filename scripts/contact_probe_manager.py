@@ -160,6 +160,14 @@ class ContactProbeManager:
                       self._classification_mode, self._classify_decision,
                       self._force_threshold_n, self._force_settle_time)
         self._backup_speed  = rospy.get_param('~backup_speed', 0.20)
+        # NORMAL_NAV cap: normal_speed_fraction x the planner's max_vel_x
+        # (read from its own parameter); >= 1 means no cap (speed_limit=inf).
+        frac = rospy.get_param('~normal_speed_fraction', 1.0)
+        vmax = rospy.get_param(rospy.get_param('~planner_max_vel_x_param',
+                                               '/move_base/HaptiQuadNavPlanner/max_vel_x'), 0.6)
+        self._normal_speed = float('inf') if frac >= 1.0 else max(0.0, frac * vmax)
+        rospy.loginfo('[ContactProbe] NORMAL_NAV speed cap: %s',
+                      'none' if math.isinf(self._normal_speed) else '%.2f m/s' % self._normal_speed)
         _robot_radius      = rospy.get_param('~robot_radius', 0.55)
         _inflation_radius  = rospy.get_param('~inflation_radius', 0.80)
         _backup_margin     = rospy.get_param('~backup_extra_margin', 0.25)
@@ -429,7 +437,7 @@ class ContactProbeManager:
 
     def start(self):
         # No motion until calibrated: speed 0 while CALIBRATING.
-        self._set_speed_limit(float('inf'))
+        self._set_speed_limit(self._normal_speed)
         self._state_pub.publish(String(data=self._state))
 
         # ── move_base action client ───────────────────────────────────────────
@@ -1020,7 +1028,7 @@ class ContactProbeManager:
         self._state_pub.publish(String(data=new_state))
 
         if new_state == NORMAL_NAV:
-            self._set_speed_limit(float('inf'))
+            self._set_speed_limit(self._normal_speed)
             self._goal_needs_resend = False
             if prev_state in (CONTACT_PROBE, CLASSIFYING, BACKING_UP):
                 self._send_goal()   # preempts any active goal implicitly
@@ -1098,7 +1106,7 @@ class ContactProbeManager:
         self._contact_point = None
         self._state = NORMAL_NAV
         self._state_enter_time = rospy.Time.now()
-        self._set_speed_limit(float('inf'))
+        self._set_speed_limit(self._normal_speed)
         self._state_pub.publish(String(data=NORMAL_NAV))
         self._publish_obstacles()          # republish now-empty cloud -- clears the latch
         self._publish_movable_obstacles()  # same
@@ -1117,7 +1125,7 @@ class ContactProbeManager:
             self._mb_client.cancel_all_goals()
             self._state = NORMAL_NAV
             self._state_enter_time = rospy.Time.now()
-            self._set_speed_limit(float('inf'))
+            self._set_speed_limit(self._normal_speed)
             self._state_pub.publish(String(data=NORMAL_NAV))
             self._goal_needs_resend = False
         rospy.loginfo('[ContactProbe] probing_enabled=%s', req.data)

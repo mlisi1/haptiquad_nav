@@ -65,3 +65,7 @@ classification_decision: event
 # plateaued at 152-159N (push limit). 130N sits ~20N from both. Tall objects
 # that tip at 115-130N (same box on the bare floor) come out MOVABLE.
 classification_force_threshold_n: 130.0
+
+# First autonomous runs: cruise at half the planner's max_vel_x (0.6 -> 0.3 m/s).
+# This is also the speed a MOVABLE object is pushed at after classification.
+normal_speed_fraction: 0.5

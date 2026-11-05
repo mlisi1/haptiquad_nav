@@ -44,7 +44,7 @@ contact_force_threshold_n: 12.0
 wrench_filter_window: 50        # samples
 
 # ── Speed profiles ────────────────────────────────────────────────
-normal_speed_fraction: 1.0      # fraction of max_vel_x in NORMAL_NAV
+normal_speed_fraction: 1.0      # fraction of the planner's max_vel_x in NORMAL_NAV; >= 1 = no cap
 slow_approach_speed: 0.30       # [m/s] absolute, in SLOW_APPROACH state
 probe_speed: 0.4              # [m/s] absolute, in CONTACT_PROBE state
                                # tuning_sweep_02: solid accuracy 0.2→0.65, 0.3→0.96, 0.4→0.99
