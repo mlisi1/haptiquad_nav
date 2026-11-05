@@ -112,3 +112,17 @@ operator and are independent of all of the above.
 - The HaptiQuad model (`haptiquad_ros`) still uses the generic
   `anymal_c_simple_description` URDF with friction off. The bias calibration
   removes a constant offset, not model errors that depend on motion.
+
+## Recording sessions
+
+`rosrun haptiquad_nav record_robot.sh <profile> <name> [extra topics...]`
+writes `<name>_<date>.bag` (in `$BAG_DIR`, default the current directory).
+`record_robot.sh list` prints every topic per profile; `DRY_RUN=1` prints the
+command only. Each profile includes the one before it:
+
+| Profile | Adds | Use for |
+|---|---|---|
+| `haptiquad` | `anymal_state`, `/estimated_forces`, residuals, TF, diagnostics | estimator rate / noise / bias, offline replay |
+| `push` | lidar, `/twist_mux/twist`, `/odom` | manual pushes without the nav stack |
+| `nav` | `/slam/pose`, `/rosout`, `/haptiquad_nav/*` state, move_base goal/status/plan | autonomous runs |
+| `debug` | global/local/debug costmaps | planner problems (large bags) |
