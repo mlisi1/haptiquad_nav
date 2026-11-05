@@ -36,7 +36,7 @@ from geometry_msgs.msg import (WrenchStamped, PoseStamped, Quaternion,
 from sensor_msgs.msg import PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseActionResult
-from actionlib_msgs.msg import GoalStatus
+from actionlib_msgs.msg import GoalStatus, GoalStatusArray
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from std_srvs.srv import Empty, EmptyResponse, SetBool, SetBoolResponse
 
@@ -178,6 +178,18 @@ class ContactProbeManager:
         self._op_db_lin   = rospy.get_param('~operator_deadband_linear', 0.05)
         self._op_db_ang   = rospy.get_param('~operator_deadband_angular', 0.10)
         self._op_hold     = rospy.get_param('~operator_hold_time', 1.0)
+        # Robot: no probing outside a mission (with a robot parked within
+        # probe_distance of an obstacle, CONTACT_PROBE used to send its own
+        # probe goal and walk into it with no goal set), and move_base may
+        # only run goals a mission owns: any other goal still active after
+        # unowned_goal_grace s is cancelled.
+        self._mission_only    = rospy.get_param('~probe_only_in_mission', False)
+        self._cancel_unowned  = rospy.get_param('~cancel_unowned_goals', False)
+        self._unowned_grace   = rospy.get_param('~unowned_goal_grace', 0.5)
+        # Robot: objects are moved by hand between trials, so obstacles
+        # remembered from an earlier mission are wrong (a box remembered as
+        # MOVABLE was hit at cruise speed after 20 kg were added).
+        self._forget_on_goal  = rospy.get_param('~forget_obstacles_on_new_goal', False)
         # NORMAL_NAV cap: normal_speed_fraction x the planner's max_vel_x
         # (read from its own parameter); >= 1 means no cap (speed_limit=inf).
         frac = rospy.get_param('~normal_speed_fraction', 1.0)
@@ -299,6 +311,8 @@ class ContactProbeManager:
         self._op_active_until = None      # rospy.Time: joystick in use until then
         self._op_abort_pending = False
         self._mission_active = False      # user goal received and not yet reached
+        self._mb_busy = False             # move_base reports a PENDING/ACTIVE goal
+        self._unowned_since = None
         self._probe_exit_t = None         # last exit from CONTACT_PROBE/CLASSIFYING/BACKING_UP
         self._odom_hist = collections.deque(maxlen=80)   # (t, x, y) odom, 10Hz ticks
         self._approach_speed = None   # odom forward speed before contact onset
@@ -487,6 +501,8 @@ class ContactProbeManager:
         rospy.Subscriber('base_wrench',       WrenchStamped,              self._wrench_cb,  queue_size=1)
         rospy.Subscriber('point_cloud_in',    PointCloud2,                self._cloud_cb,   queue_size=1)
         rospy.Subscriber('odom_in',           Odometry,                   self._odom_cb,    queue_size=1)
+        if self._cancel_unowned:
+            rospy.Subscriber('/move_base/status', GoalStatusArray, self._mb_status_cb, queue_size=1)
         if self._op_enabled:
             rospy.Subscriber(self._op_topic, rospy.AnyMsg, self._operator_twist_cb, queue_size=10)
             rospy.Subscriber('/move_base/result', MoveBaseActionResult,
@@ -537,6 +553,11 @@ class ContactProbeManager:
             self._halt_reason = ''
             self._halt_reason_pub.publish(String(data=''))
             self._enter(NORMAL_NAV)
+        if self._forget_on_goal and (self._solid_obstacles or self._movable_obstacles):
+            rospy.loginfo('[ContactProbe] New goal: forgetting %d solid and %d movable '
+                          'obstacle(s) from earlier missions.',
+                          len(self._solid_obstacles), len(self._movable_obstacles))
+            self._clear_obstacle_memory()
         goal = MoveBaseGoal()
         goal.target_pose = self._pose_to_nav(msg)
         self._last_goal = goal
@@ -846,20 +867,51 @@ class ContactProbeManager:
         if self._mission_active and not self._op_abort_pending:
             self._op_abort_pending = True
 
+    def _mb_status_cb(self, msg):
+        self._mb_busy = any(st.status in (GoalStatus.PENDING, GoalStatus.ACTIVE)
+                            for st in msg.status_list)
+
+    def _check_unowned_goal(self):
+        """Cancel a move_base goal that no mission owns (see cancel_unowned_goals).
+        The grace period covers a user goal reaching move_base just before
+        this node's own callback marks the mission active."""
+        if not self._cancel_unowned or self._mission_active or not self._mb_busy:
+            self._unowned_since = None
+            return
+        now = rospy.Time.now()
+        if self._unowned_since is None:
+            self._unowned_since = now
+            return
+        if (now - self._unowned_since).to_sec() < self._unowned_grace:
+            return
+        rospy.logwarn('[ContactProbe] move_base is running a goal outside any mission '
+                      '(in %s) -- cancelling it.', self._state)
+        self._mb_client.cancel_all_goals()
+        self._mission_event('cancelled a move_base goal outside a mission')
+        self._unowned_since = None
+
     @_synchronized
     def _mb_result_cb(self, msg):
-        """Mission ends when move_base reaches the user goal: a SUCCEEDED
-        result in NORMAL_NAV or SLOW_APPROACH (probe/backup goals finish in
-        their own states; results within 1 s of leaving them are skipped as
-        late probe/backup results)."""
+        """Mission ends when move_base finishes the user goal: SUCCEEDED, or
+        ABORTED (no plan; move_base gave up), in NORMAL_NAV or SLOW_APPROACH.
+        Probe/backup goals finish in their own states; results within 1 s of
+        leaving them are skipped as late probe/backup results. PREEMPTED is
+        this node replacing the goal, so the mission goes on."""
         late = (self._probe_exit_t is not None and
                 (rospy.Time.now() - self._probe_exit_t).to_sec() < 1.0)
-        if (msg.status.status == GoalStatus.SUCCEEDED and self._mission_active and
-                self._state in (NORMAL_NAV, SLOW_APPROACH) and not late):
+        status = msg.status.status
+        retrying = status == GoalStatus.ABORTED and self._goal_needs_resend  # watchdog retries it
+        if (status in (GoalStatus.SUCCEEDED, GoalStatus.ABORTED) and self._mission_active and
+                self._state in (NORMAL_NAV, SLOW_APPROACH) and not late and not retrying):
             self._mission_active = False
             self._last_goal = None
-            rospy.loginfo('[ContactProbe] Goal reached -- mission complete.')
-            self._mission_event('goal reached')
+            if status == GoalStatus.SUCCEEDED:
+                rospy.loginfo('[ContactProbe] Goal reached -- mission complete.')
+                self._mission_event('goal reached')
+            else:
+                rospy.logwarn('[ContactProbe] move_base aborted the goal (%s) -- mission ended. '
+                              'Send a new goal to continue.', msg.status.text or 'no reason')
+                self._mission_event('goal aborted by move_base')
 
     def _operator_abort(self):
         """Operator took over during a mission: drop it cleanly."""
@@ -1248,9 +1300,7 @@ class ContactProbeManager:
         rospy.loginfo('[ContactProbe] Reset requested -- clearing obstacle memory and state.')
         self._halt_reason = ''
         self._mb_client.cancel_all_goals()
-        self._solid_obstacles = []
-        self._solid_pts = []
-        self._movable_obstacles = []
+        self._clear_obstacle_memory()
         self._wrench_above_since = None
         self._goal_needs_resend = False
         self._last_goal = None
@@ -1261,9 +1311,16 @@ class ContactProbeManager:
         self._state_enter_time = rospy.Time.now()
         self._set_speed_limit(self._normal_speed)
         self._state_pub.publish(String(data=NORMAL_NAV))
-        self._publish_obstacles()          # republish now-empty cloud -- clears the latch
-        self._publish_movable_obstacles()  # same
         return EmptyResponse()
+
+    def _clear_obstacle_memory(self):
+        """Forget all solid and movable obstacles; the republished empty clouds
+        clear the latched topics (and the global costmap's solid layer)."""
+        self._solid_obstacles = []
+        self._solid_pts = []
+        self._movable_obstacles = []
+        self._publish_obstacles()
+        self._publish_movable_obstacles()
 
     @_synchronized
     def _set_probing_enabled_cb(self, req):
@@ -1565,6 +1622,7 @@ class ContactProbeManager:
 
         if self._op_abort_pending:
             self._operator_abort()
+        self._check_unowned_goal()
         self._motion_allowed = self._safety_step()
         if not self._motion_allowed:
             return
@@ -1607,11 +1665,13 @@ class ContactProbeManager:
                     self._goal_needs_resend = False  # goal accepted and alive
 
             if (self._nearest_obs <= self._slow_dist and
-                    rospy.Time.now() >= self._backup_cooldown_until):
+                    rospy.Time.now() >= self._backup_cooldown_until and
+                    (self._mission_active or not self._mission_only)):
                 self._enter(SLOW_APPROACH)
 
         elif state == SLOW_APPROACH:
-            if self._nearest_obs > self._slow_dist + self._slow_exit_margin:
+            if (self._nearest_obs > self._slow_dist + self._slow_exit_margin or
+                    (self._mission_only and not self._mission_active)):
                 self._enter(NORMAL_NAV)
             elif (self._nearest_obs <= self._probe_dist and
                     abs(self._nearest_obs_angle) <= self._probe_heading_thr):

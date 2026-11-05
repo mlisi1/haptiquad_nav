@@ -149,6 +149,12 @@ operator_twist_topic: /joy_manager/twist   # joy_manager's twist into twist_mux 
 operator_deadband_linear: 0.05          # [m/s]
 operator_deadband_angular: 0.10         # [rad/s]
 operator_hold_time: 1.0                 # [s] gate stays closed this long after the last stick command
+# Robot safety (contact_probe_manager.py): probing only during a mission,
+# cancel move_base goals no mission owns, forget obstacles on each new goal.
+probe_only_in_mission: false
+cancel_unowned_goals: false
+unowned_goal_grace: 0.5              # [s] covers a user goal reaching move_base first
+forget_obstacles_on_new_goal: false
 
 # ── Back-up after SOLID detection ─────────────────────────────────
 # After classifying an obstacle as SOLID, the robot reverses briefly so

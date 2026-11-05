@@ -68,5 +68,6 @@ catkin_install_python(PROGRAMS
   scripts/contact_probe_manager.py
   scripts/cmd_vel_gate.py
   scripts/nav_supervisor.py
+  scripts/send_goal_ahead.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

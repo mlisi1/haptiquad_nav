@@ -103,6 +103,31 @@ Send a new goal to continue. Between missions the joystick only closes the
 gate while in use, and the collision stop is off, so repositioning the robot
 by hand never aborts or HALTs anything.
 
+**Missions on the robot** (`contact_probe_robot.yaml`):
+- No probing outside a mission (`probe_only_in_mission`): without a user goal
+  the state machine stays in NORMAL_NAV, whatever is in front of the robot.
+  Before this, a stack relaunched with the robot standing within 0.70 m of
+  the box sent itself a probe goal and walked into it.
+- `move_base` only runs goals a mission owns (`cancel_unowned_goals`): any
+  other goal still active after 0.5 s is cancelled and logged on
+  `mission_event`.
+- A mission ends on SUCCEEDED, on operator takeover, and on ABORTED from
+  `move_base` (no plan, e.g. a goal inside a marked solid).
+- Each new goal forgets the solids and movables of earlier missions
+  (`forget_obstacles_on_new_goal`), since objects are moved between trials.
+
+Goals relative to the robot, instead of clicking:
+
+```bash
+rosrun haptiquad_nav send_goal_ahead.py 2          # 2 m ahead
+rosrun haptiquad_nav send_goal_ahead.py 3 -1       # 3 m ahead, 1 m to the right
+rosrun haptiquad_nav send_goal_ahead.py 2 --dry-run
+```
+
+For a SOLID trial put the goal well past the obstacle and to one side: a goal
+within about 1.4 m of the contact face (box depth 0.5 m + inflation 0.8 m)
+has no plan.
+
 HALTED cancels all goals and sets `speed_limit=0`. The reason is on
 `/haptiquad_nav/halt_reason` (latched). Only a new goal resumes navigation,
 and only once everything is healthy again.
