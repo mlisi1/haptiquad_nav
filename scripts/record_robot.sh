@@ -4,21 +4,29 @@
 #   rosrun haptiquad_nav record_robot.sh <profile> <name> [extra topics...]
 #   rosrun haptiquad_nav record_robot.sh list
 #
-# Profiles (each includes the one above it):
-#   haptiquad  estimator only: its input and outputs, enough to replay
-#              HaptiQuad offline and check rate / noise / bias
-#   push       + lidar, commands, odometry: manual pushes, no nav stack
-#   nav        + localization and haptiquad_nav state machine / move_base:
-#              autonomous runs
-#   debug      + costmaps and plans: planner debugging (large bags)
+# Profiles:
+#   haptiquad  estimator only: its input and all outputs (incl. residuals),
+#              for rate / noise / bias checks and offline replay
+#   push       estimator input + wrench, lidar, commands, odometry: manual
+#              pushes, no nav stack (no residuals: two more 400 Hz streams
+#              the analysis doesn't need)
+#   nav        push + localization and haptiquad_nav state machine /
+#              move_base: autonomous runs
+#   debug      nav + residuals, costmaps and plans (large bags)
 #
 # The bag is written as <name>_<date>.bag in $BAG_DIR (default: current dir).
+# Run it ON THE ROBOT and copy the bag afterwards (rsync): recording on a PC
+#   over WiFi drops messages and stalls 3-7 s at a time (2026-11-05 run-3 bags:
+#   lidar alone is several MB/s). Keep space free on the robot's disk.
+# BAG_BUFFER_MB sets rosbag's write buffer (default 1024; rosbag's own is 256).
+# COMPRESS=1 records with --lz4 (less disk, more CPU).
 # DRY_RUN=1 prints the rosbag command instead of running it.
+# Stop with Ctrl-C so the bag gets its index.
 set -e
 
-haptiquad=(/state_estimator/anymal_state /estimated_forces /residuals
-           /residual_errors /tf /tf_static /diagnostics)
-push=("${haptiquad[@]}" /lidar/point_cloud /twist_mux/twist /odom)
+core=(/state_estimator/anymal_state /estimated_forces /tf /tf_static /diagnostics)
+haptiquad=("${core[@]}" /residuals /residual_errors)
+push=("${core[@]}" /lidar/point_cloud /twist_mux/twist /odom)
 nav=("${push[@]}" /slam/pose /anymal/base_wrench /rosout
      /haptiquad_nav/state /haptiquad_nav/speed_limit
      /haptiquad_nav/motion_allowed /haptiquad_nav/halt_reason
@@ -28,7 +36,7 @@ nav=("${push[@]}" /slam/pose /anymal/base_wrench /rosout
      /haptiquad_nav/nearest_rear_obstacle_distance
      /move_base_simple/goal /move_base/goal /move_base/status /move_base/result
      /move_base/GlobalPlanner/plan /haptiquad_nav/cmd_vel_raw)
-debug=("${nav[@]}" /move_base/global_costmap/costmap
+debug=("${nav[@]}" /residuals /residual_errors /move_base/global_costmap/costmap
        /move_base/global_costmap/costmap_updates
        /move_base/local_costmap/costmap /haptiquad_nav/debug_costmap)
 
@@ -52,7 +60,9 @@ name=${2:-}
 shift 2
 declare -n topics=$profile
 
-cmd=(rosbag record -o "${BAG_DIR:-.}/$name" "${topics[@]}" "$@")
+opts=(-b "${BAG_BUFFER_MB:-1024}")
+[ -n "$COMPRESS" ] && opts+=(--lz4)
+cmd=(rosbag record "${opts[@]}" -o "${BAG_DIR:-.}/$name" "${topics[@]}" "$@")
 if [ -n "$DRY_RUN" ]; then echo "${cmd[@]}"; exit 0; fi
 echo "[record_robot] profile '$profile' (${#topics[@]} topics$([ $# -gt 0 ] && echo " + $#")) -> ${BAG_DIR:-.}/${name}_<date>.bag"
 exec "${cmd[@]}"

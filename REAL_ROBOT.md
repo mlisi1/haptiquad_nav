@@ -123,6 +123,12 @@ command only. Each profile includes the one before it:
 | Profile | Adds | Use for |
 |---|---|---|
 | `haptiquad` | `anymal_state`, `/estimated_forces`, residuals, TF, diagnostics | estimator rate / noise / bias, offline replay |
-| `push` | lidar, `/twist_mux/twist`, `/odom` | manual pushes without the nav stack |
-| `nav` | `/slam/pose`, `/rosout`, `/haptiquad_nav/*` state, move_base goal/status/plan | autonomous runs |
-| `debug` | global/local/debug costmaps | planner problems (large bags) |
+| `push` | estimator input and wrench (no residuals), lidar, `/twist_mux/twist`, `/odom` | manual pushes without the nav stack |
+| `nav` | `push` + `/slam/pose`, `/rosout`, `/haptiquad_nav/*` state, move_base goal/status/plan | autonomous runs |
+| `debug` | `nav` + residuals, global/local/debug costmaps | planner problems (large bags) |
+
+Record on the robot and `rsync` the bag afterwards: recording on a PC over
+WiFi dropped messages and stalled 3-7 s at a time in the 2026-11-05 run-3
+bags. The write buffer defaults to 1024 MB (`BAG_BUFFER_MB`); `COMPRESS=1`
+adds `--lz4`. Keep free space on the robot's disk and stop with Ctrl-C so the
+bag gets its index.
