@@ -251,6 +251,11 @@ class ContactProbeManager:
         # ground or over low obstacles.
         self._cloud_h_ref  = rospy.get_param('~cloud_height_reference', 'base')
         self._odom_frame   = rospy.get_param('~odom_frame', 'odom')
+        # Frame for planning, goals, contact points and obstacle marks. 'map'
+        # in simulation; 'odom' on the robot (SLAM there wandered up to 0.7 m
+        # with the robot standing still, and each trial starts from a fresh
+        # launch, so odometry drift stays within one short trial).
+        self._nav_frame    = rospy.get_param('~nav_frame', 'map')
         # [x_min, x_max, y_min, y_max] in base frame: drop returns from the
         # robot's own body/legs. Empty = disabled (cloud_range_min only).
         self._self_box     = rospy.get_param('~self_filter_box', [])
@@ -330,7 +335,7 @@ class ContactProbeManager:
         self._last_fwd_pts_raw_map  = None   # (N,2) map-frame forward pts
         self._last_all_pts_map      = None   # (N,2) map-frame full-360° pts
 
-        # ── Robot pose (map frame) ────────────────────────────────────────────
+        # ── Robot pose (nav_frame, from TF -- see _refresh_pose) ──────────────
         self._robot_x   = 0.0
         self._robot_y   = 0.0
         self._robot_yaw = 0.0
@@ -481,7 +486,6 @@ class ContactProbeManager:
         # ── Subscribers ───────────────────────────────────────────────────────
         rospy.Subscriber('base_wrench',       WrenchStamped,              self._wrench_cb,  queue_size=1)
         rospy.Subscriber('point_cloud_in',    PointCloud2,                self._cloud_cb,   queue_size=1)
-        rospy.Subscriber('/slam/pose',        PoseWithCovarianceStamped,  self._pose_cb,    queue_size=1)
         rospy.Subscriber('odom_in',           Odometry,                   self._odom_cb,    queue_size=1)
         if self._op_enabled:
             rospy.Subscriber(self._op_topic, rospy.AnyMsg, self._operator_twist_cb, queue_size=10)
@@ -534,7 +538,7 @@ class ContactProbeManager:
             self._halt_reason_pub.publish(String(data=''))
             self._enter(NORMAL_NAV)
         goal = MoveBaseGoal()
-        goal.target_pose = msg
+        goal.target_pose = self._pose_to_nav(msg)
         self._last_goal = goal
         self._mission_active = True
         rospy.loginfo('[ContactProbe] User goal: (%.2f, %.2f)',
@@ -581,6 +585,7 @@ class ContactProbeManager:
                 tf2_ros.ExtrapolationException) as e:
             rospy.logwarn_throttle(5.0, '[ContactProbe] TF lookup failed: %s', e)
             return
+        self._refresh_pose()   # same moment as the cloud transform above
 
         n = msg.width * msg.height
         if n == 0:
@@ -756,19 +761,66 @@ class ContactProbeManager:
             self._nearest_obs = float('inf')
             self._nearest_obs_angle = 0.0
 
-    def _pose_cb(self, msg):
-        p = msg.pose.pose
-        if not all(math.isfinite(v) for v in (p.position.x, p.position.y, p.orientation.z,
-                                              p.orientation.w)):
+    def _refresh_pose(self):
+        """Robot pose in nav_frame from TF (nav_frame -> base). Used instead
+        of /slam/pose, which on the robot arrives at 1.4 Hz and 1.1-1.5 s
+        after its stamp. The pose is as old as the transform's stamp, so a
+        stalled localization (map) or state estimator still shows as stale."""
+        try:
+            tr = self._tf_buf.lookup_transform(self._nav_frame, 'base', rospy.Time(0))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn_throttle(5.0, '[ContactProbe] No %s->base transform: %s',
+                                   self._nav_frame, e)
+            return
+        t, q = tr.transform.translation, tr.transform.rotation
+        if not all(math.isfinite(v) for v in (t.x, t.y, q.x, q.y, q.z, q.w)):
             rospy.logwarn_throttle(2.0, '[ContactProbe] Non-finite pose dropped.')
             return
-        self._last_pose_t = rospy.Time.now()
-        self._robot_x = p.position.x
-        self._robot_y = p.position.y
-        q = p.orientation
-        _, _, yaw = tf.transformations.euler_from_quaternion(
+        self._robot_x, self._robot_y = t.x, t.y
+        _, _, self._robot_yaw = tf.transformations.euler_from_quaternion(
             [q.x, q.y, q.z, q.w])
-        self._robot_yaw = yaw
+        stamp = tr.header.stamp
+        self._last_pose_t = stamp if not stamp.is_zero() else rospy.Time.now()
+
+    def _frame_in_nav(self, frame):
+        """(x, y, yaw) of `frame` in nav_frame; identity for '' or nav_frame,
+        None if the transform is unavailable."""
+        if not frame or frame.lstrip('/') == self._nav_frame:
+            return 0.0, 0.0, 0.0
+        try:
+            tr = self._tf_buf.lookup_transform(self._nav_frame, frame.lstrip('/'),
+                                               rospy.Time(0), rospy.Duration(0.2))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn('[ContactProbe] No %s->%s transform: %s', self._nav_frame, frame, e)
+            return None
+        t, q = tr.transform.translation, tr.transform.rotation
+        _, _, yaw = tf.transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+        return t.x, t.y, yaw
+
+    def _pose_to_nav(self, msg):
+        """PoseStamped in nav_frame (planar), e.g. an rviz goal sent with a
+        different fixed frame. Unchanged if the transform is unavailable
+        (move_base still transforms it itself)."""
+        tr = self._frame_in_nav(msg.header.frame_id)
+        if tr is None or tr == (0.0, 0.0, 0.0):
+            return msg
+        dx, dy, dyaw = tr
+        c, s = math.cos(dyaw), math.sin(dyaw)
+        p, q = msg.pose.position, msg.pose.orientation
+        _, _, yaw = tf.transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+        out = PoseStamped()
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id = self._nav_frame
+        out.pose.position.x = dx + c * p.x - s * p.y
+        out.pose.position.y = dy + s * p.x + c * p.y
+        out.pose.position.z = p.z
+        qn = tf.transformations.quaternion_from_euler(0, 0, yaw + dyaw)
+        out.pose.orientation = Quaternion(x=qn[0], y=qn[1], z=qn[2], w=qn[3])
+        rospy.loginfo('[ContactProbe] Goal converted from %s to %s.',
+                      msg.header.frame_id, self._nav_frame)
+        return out
 
     # ── Wrench helpers ────────────────────────────────────────────────────────
 
@@ -965,7 +1017,7 @@ class ContactProbeManager:
 
         cloud = PointCloud2()
         cloud.header.stamp = rospy.Time.now()
-        cloud.header.frame_id = 'map'
+        cloud.header.frame_id = self._nav_frame
         cloud.height = 1
         cloud.width  = len(pts)
         cloud.fields = [
@@ -985,7 +1037,7 @@ class ContactProbeManager:
         pts = [(float(x), float(y), 0.0) for x, y, _ in self._movable_obstacles]
         cloud = PointCloud2()
         cloud.header.stamp = rospy.Time.now()
-        cloud.header.frame_id = 'map'
+        cloud.header.frame_id = self._nav_frame
         cloud.height = 1
         cloud.width  = len(pts)
         cloud.fields = [
@@ -1081,7 +1133,7 @@ class ContactProbeManager:
         q = tf.transformations.quaternion_from_euler(0, 0, self._probe_entry_yaw)
 
         goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = 'map'
+        goal.target_pose.header.frame_id = self._nav_frame
         goal.target_pose.header.stamp    = rospy.Time.now()
         goal.target_pose.pose.position.x = gx
         goal.target_pose.pose.position.y = gy
@@ -1107,7 +1159,7 @@ class ContactProbeManager:
             orient = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
         goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = 'map'
+        goal.target_pose.header.frame_id = self._nav_frame
         goal.target_pose.header.stamp    = rospy.Time.now()
         goal.target_pose.pose.position.x = gx
         goal.target_pose.pose.position.y = gy
@@ -1283,6 +1335,15 @@ class ContactProbeManager:
         the same way _refine_last_solid() builds one, just from the given
         corners instead of a lidar-measured face."""
         pts = np.array([[p.x, p.y] for p in msg.polygon.points], dtype=float)
+        tr = self._frame_in_nav(msg.header.frame_id)
+        if tr is None:
+            rospy.logwarn('[ContactProbe] inject_known_solid: cannot transform from %s -- '
+                          'ignoring.', msg.header.frame_id)
+            return
+        if pts.size and tr != (0.0, 0.0, 0.0):
+            c, s = math.cos(tr[2]), math.sin(tr[2])
+            pts = np.stack([tr[0] + c * pts[:, 0] - s * pts[:, 1],
+                            tr[1] + s * pts[:, 0] + c * pts[:, 1]], axis=1)
         if pts.shape[0] < 3:
             rospy.logwarn('[ContactProbe] inject_known_solid: need >=3 polygon '
                           'points, got %d -- ignoring.', pts.shape[0])
@@ -1500,6 +1561,7 @@ class ContactProbeManager:
         if self._last_update_wall is not None:
             self._loop_period_buf.append((now - self._last_update_wall).to_sec())
         self._last_update_wall = now
+        self._refresh_pose()
 
         if self._op_abort_pending:
             self._operator_abort()

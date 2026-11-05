@@ -20,17 +20,22 @@ inputs:
   - {topic: /state_estimator/pose_in_odom,  min_rate: 20.0, max_age: 0.3, finite: true}
   - {topic: /state_estimator/twist,         min_rate: 20.0, max_age: 0.3, finite: true}
   - {topic: /odom,                          min_rate: 20.0, max_age: 0.3, finite: true}   # odom_bridge
-  - {topic: /slam/pose,                     min_rate: 0.5,  max_age: 3.0, finite: true}   # 1.2-1.4 Hz on the robot, stamps up to 2.03 s old
   - {topic: /lidar/point_cloud,             min_rate: 5.0,  max_age: 0.5, nonempty: true}
   - {topic: /estimated_forces,              min_rate: 20.0, max_age: 0.3, finite: true}   # HaptiQuad
   - {topic: /anymal/base_wrench,            min_rate: 20.0, max_age: 0.3, finite: true}   # wrench_bridge
 
 # [target_frame, source_frame, max_age_s]
 transforms:
-  - [map, base, 1.0]
   - [odom, base, 0.3]
 
 # Heartbeats of the core nodes themselves (checked after core_startup_grace_s).
 runtime_inputs:
   - {topic: /move_base/status,               min_rate: 2.0}   # actionlib status, 5Hz
   - {topic: /haptiquad_nav/motion_allowed,   min_rate: 5.0}   # contact_probe_manager loop
+
+# Checked only with ~require_localization (navigation.launch sets it when
+# nav_frame is map, i.e. in simulation; the robot runs in odom).
+localization_inputs:
+  - {topic: /slam/pose,                     min_rate: 0.5,  max_age: 3.0, finite: true}   # 1.2-1.4 Hz on the robot, stamps up to 2.03 s old
+localization_transforms:
+  - [map, base, 1.0]

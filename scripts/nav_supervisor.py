@@ -148,6 +148,13 @@ class NavSupervisor:
         self._inputs = [TopicCheck(c, max_future) for c in rospy.get_param('~inputs', [])]
         self._runtime = [TopicCheck(c, max_future) for c in rospy.get_param('~runtime_inputs', [])]
         self._tfs = rospy.get_param('~transforms', [])   # [target, source, max_age]
+        if rospy.get_param('~require_localization', True):
+            self._inputs += [TopicCheck(c, max_future)
+                             for c in rospy.get_param('~localization_inputs', [])]
+            self._tfs += rospy.get_param('~localization_transforms', [])
+        else:
+            rospy.loginfo('[NavSupervisor] Localization not required (nav_frame odom): '
+                          'no /slam/pose or map->base checks.')
         self._wait_param = rospy.get_param('~wait_for_true_param', '')
         self._core_pkg = rospy.get_param('~core_launch/package', 'haptiquad_nav')
         self._core_file = rospy.get_param('~core_launch/file', 'navigation_core.launch')

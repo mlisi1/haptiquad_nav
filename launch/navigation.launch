@@ -23,6 +23,11 @@
   <arg name="map_server"        default="$(eval platform == 'sim')"/>
   <arg name="map_file"          default="$(find haptiquad_nav)/maps/empty.yaml"/>
   <arg name="map_frame"         default="map"/>
+  <!-- Frame for planning, goals and obstacle marks. odom on the robot: SLAM
+       wandered up to 0.7 m standing still, and every trial is a fresh launch,
+       so odometry drift stays within one short trial. map keeps SLAM in the
+       loop (and the supervisor's /slam/pose and map->base checks). -->
+  <arg name="nav_frame"         default="$(eval 'odom' if platform == 'robot' else 'map')"/>
   <arg name="pointcloud_topic"  default="/lidar/point_cloud"/>
   <arg name="wrench_topic"      default="/anymal/base_wrench"/>
   <!-- twist_mux input the gate publishes to. On the robot, check its
@@ -34,7 +39,8 @@
   <!-- set to false if robot is already in walk mode -->
   <arg name="init_robot"        default="true"/>
   <arg name="rviz"              default="false"/>
-  <arg name="rviz_config"       default="$(find haptiquad_nav)/config/navigation.rviz"/>
+  <arg name="rviz_file"         default="$(eval 'navigation_robot.rviz' if platform == 'robot' else 'navigation.rviz')"/>
+  <arg name="rviz_config"       default="$(find haptiquad_nav)/config/$(arg rviz_file)"/>
   <!-- MOVABLE/SOLID criterion override ('force' | 'displacement'); blank =
        contact_probe.yaml. See its "Classification criterion" section. -->
   <arg name="classification_mode" default=""/>
@@ -66,12 +72,14 @@
   <node name="nav_supervisor" pkg="haptiquad_nav" type="nav_supervisor.py"
         output="screen" required="true" clear_params="true">
     <rosparam file="$(find haptiquad_nav)/config/nav_supervisor.yaml" command="load"/>
+    <param name="require_localization" value="$(eval nav_frame == 'map')"/>
     <param name="wait_for_true_param" value="/haptiquad_nav/motion_initialized"
            if="$(arg init_robot)"/>
     <param name="core_args" value="platform:=$(arg platform)
                                    map_server:=$(arg map_server)
                                    map_file:=$(arg map_file)
                                    map_frame:=$(arg map_frame)
+                                   nav_frame:=$(arg nav_frame)
                                    pointcloud_topic:=$(arg pointcloud_topic)
                                    wrench_topic:=$(arg wrench_topic)
                                    cmd_vel_topic:=$(arg cmd_vel_topic)

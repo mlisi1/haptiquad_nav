@@ -9,6 +9,32 @@ roslaunch haptiquad_nav navigation.launch            # platform:=robot, use_sim_
 In simulation, use `platform:=sim use_sim_time:=true` (plus `eval_mode:=true` for
 the `haptiquad_nav_eval` sweeps; `tools/run_sweep.sh` passes all three).
 
+## Navigation frame: odom on the robot
+
+`nav_frame` (launch arg) is the frame of both costmaps, every goal, contact
+points and solid/movable marks. It defaults to `odom` with `platform:=robot`
+and `map` in simulation.
+
+- Why: on 2026-11-05 SLAM's `/slam/pose` wandered 0.72 x 0.44 m and 14.5 deg
+  over two minutes with the robot standing, while `/odom` moved 3 cm. Each
+  trial is a fresh launch from a repositioned robot, so odometry drift only
+  builds up within one short trial.
+- Localization doesn't have to run: with `odom` the supervisor skips
+  `/slam/pose` and `map -> base` (`localization_inputs` /
+  `localization_transforms` in `nav_supervisor.yaml`).
+- Goals: the robot rviz config (`config/navigation_robot.rviz`, the default
+  for `rviz:=true` on the robot) has fixed frame `odom`, so 2D Nav Goals
+  arrive in `odom`. Goals in another frame are converted by
+  `contact_probe_manager` when TF allows.
+- `eval_mode` known-solid injection: give the corners in `odom` (or any frame
+  with a TF path to it). The `odom` origin is wherever the state estimator
+  started, not the start mark.
+- `nav_frame:=map` brings SLAM back (and its checks).
+
+The robot pose in `contact_probe_manager` and `debug_costmap` comes from TF
+(`nav_frame -> base`), not from `/slam/pose`, which on the robot arrives at
+1.4 Hz and 1.1-1.5 s after its stamp.
+
 ## Startup sequence
 
 1. `navigation.launch` starts only `odom_bridge`, `wrench_bridge`,
@@ -17,7 +43,8 @@ the `haptiquad_nav_eval` sweeps; `tools/run_sweep.sh` passes all three).
 2. `nav_supervisor` runs the preflight in `config/nav_supervisor.yaml`.
    - Every listed topic must publish at its minimum rate, with fresh and finite data.
    - The point cloud must not be empty.
-   - `map→base` and `odom→base` TF must be available and recent.
+   - `odom→base` TF must be available and recent (`map→base` and
+     `/slam/pose` too when `nav_frame` is `map`).
    - `anymal_motion_init` must have reached walk mode, meaning the
      `execute_motion` action returned SUCCEEDED (within 30 s). If it doesn't,
      navigation never starts.

@@ -4,7 +4,7 @@ debug_costmap.py — Rolling 3D perception costmap for visualization only.
 
 Subscribes directly to the raw lidar PointCloud2, transforms to base frame
 via tf2, applies height/range filters (360° — not just forward sector), then
-projects to map frame and publishes an inflated 2D OccupancyGrid.
+projects to nav_frame (map, or odom on the robot) and publishes an inflated 2D OccupancyGrid.
 
 Confirmed solid obstacles are excluded: they live permanently in the global
 costmap and should not create an inflation zone in this debug layer.
@@ -37,6 +37,7 @@ class DebugCostmap:
         self._h_max = rospy.get_param('~cloud_height_max',  1.20)
         self._r_min = rospy.get_param('~cloud_range_min',   0.55)
         self._r_max = rospy.get_param('~cloud_range_max',   8.0)
+        self._nav_frame = rospy.get_param('~nav_frame', 'map')   # grid frame, robot pose from TF
 
         solid_excl = rospy.get_param('~solid_excl_radius', 0.7)
         self._solid_excl_r2 = solid_excl ** 2
@@ -75,8 +76,6 @@ class DebugCostmap:
             '/haptiquad_nav/debug_costmap', OccupancyGrid, queue_size=1, latch=False)
         rospy.Subscriber('point_cloud_in', PointCloud2,
                          self._cloud_cb, queue_size=1)
-        rospy.Subscriber('/slam/pose', PoseWithCovarianceStamped,
-                         self._pose_cb, queue_size=1)
         rospy.Subscriber('/haptiquad_nav/solid_obstacles', PointCloud2,
                          self._solids_cb, queue_size=1)
         rospy.Timer(rospy.Duration(0.2), self._publish)   # 5 Hz
@@ -84,10 +83,11 @@ class DebugCostmap:
         rospy.loginfo('[DebugCostmap] %dx%d cells @ %.2f m/cell, infl=%.2f m',
                       self._w, self._h, self._res, self._infl_r)
 
-    def _pose_cb(self, msg):
-        p = msg.pose.pose
-        self._rx, self._ry = p.position.x, p.position.y
-        q = p.orientation
+    def _refresh_pose(self):
+        """Robot pose in nav_frame from TF (fresh, unlike /slam/pose)."""
+        tr = self._tf_buf.lookup_transform(self._nav_frame, 'base', rospy.Time(0))
+        self._rx, self._ry = tr.transform.translation.x, tr.transform.translation.y
+        q = tr.transform.rotation
         _, _, self._ryaw = tf.transformations.euler_from_quaternion(
             [q.x, q.y, q.z, q.w])
 
@@ -116,6 +116,7 @@ class DebugCostmap:
         try:
             tf_msg = self._tf_buf.lookup_transform(
                 'base', cloud.header.frame_id, rospy.Time(0))
+            self._refresh_pose()
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                 tf2_ros.ExtrapolationException) as e:
             rospy.logwarn_throttle(5.0, '[DebugCostmap] TF lookup failed: %s', e)
@@ -209,7 +210,7 @@ class DebugCostmap:
 
         out = OccupancyGrid()
         out.header.stamp             = rospy.Time.now()
-        out.header.frame_id          = 'map'
+        out.header.frame_id          = self._nav_frame
         out.info.resolution          = self._res
         out.info.width               = w
         out.info.height              = h

@@ -13,6 +13,7 @@
   <arg name="map_server"/>
   <arg name="map_file"/>
   <arg name="map_frame"/>
+  <arg name="nav_frame" default="map"/>
   <arg name="pointcloud_topic"/>
   <arg name="wrench_topic"/>
   <arg name="cmd_vel_topic"/>
@@ -44,6 +45,11 @@
     <rosparam file="$(find haptiquad_nav)/config/global_costmap_robot.yaml" command="load"
               ns="global_costmap" if="$(arg robot)"/>
     <rosparam file="$(find haptiquad_nav)/config/local_costmap.yaml"   command="load" ns="local_costmap"/>
+    <!-- After the yaml loads, so these win: both costmaps and the solid
+         marks live in nav_frame (map in sim, odom on the robot). -->
+    <param name="global_costmap/global_frame" value="$(arg nav_frame)"/>
+    <param name="global_costmap/solid_obstacle_layer/solid_cloud/sensor_frame" value="$(arg nav_frame)"/>
+    <param name="local_costmap/global_frame"  value="$(arg nav_frame)"/>
 
     <!-- move_base publishes raw Twist here; cmd_vel_gate stamps and gates it -->
     <remap from="cmd_vel" to="$(arg cmd_vel_raw_topic)"/>
@@ -72,6 +78,7 @@
     <param name="classification_mode" value="$(arg classification_mode)"
            if="$(eval classification_mode != '')"/>
     <param name="eval_mode" value="$(arg eval_mode)"/>
+    <param name="nav_frame" value="$(arg nav_frame)"/>
     <remap from="base_wrench"    to="$(arg wrench_topic)"/>
     <remap from="point_cloud_in" to="$(arg pointcloud_topic)"/>
     <remap from="odom_in"        to="/odom"/>
@@ -98,6 +105,7 @@
     <param name="cloud_height_max"    value="1.20"/>
     <param name="cloud_range_min"     value="0.55"/>
     <param name="cloud_range_max"     value="8.0"/>
+    <param name="nav_frame"           value="$(arg nav_frame)"/>
     <remap from="point_cloud_in"      to="$(arg pointcloud_topic)"/>
   </node>
 
