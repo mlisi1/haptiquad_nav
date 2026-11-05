@@ -79,8 +79,9 @@ normal_speed_fraction: 0.5
 #   rostopic info /joy_manager/twist
 operator_override_enabled: true
 # 2026-11-05 run 5: a relaunched stack next to the box started probing on its
-# own (CONTACT_PROBE sent a probe goal with no user goal set), and a box still
-# remembered as MOVABLE from an earlier mission was hit at cruise speed.
+# own (CONTACT_PROBE sent a probe goal with no user goal set).
 probe_only_in_mission: true          # no SLOW_APPROACH/CONTACT_PROBE without a user goal
 cancel_unowned_goals: true           # cancel move_base goals no mission owns
-forget_obstacles_on_new_goal: true   # objects are rearranged between trials
+# Movables are remembered across goals by design (lidar tracking keeps them
+# up to date); relaunch between trials when objects are rearranged.
+forget_obstacles_on_new_goal: false

@@ -113,8 +113,10 @@ by hand never aborts or HALTs anything.
   `mission_event`.
 - A mission ends on SUCCEEDED, on operator takeover, and on ABORTED from
   `move_base` (no plan, e.g. a goal inside a marked solid).
-- Each new goal forgets the solids and movables of earlier missions
-  (`forget_obstacles_on_new_goal`), since objects are moved between trials.
+- Solids and movables are remembered across goals, as in simulation
+  (`forget_obstacles_on_new_goal: false`). Relaunch between trials when the
+  objects are rearranged: a remembered MOVABLE is not slowed for, so moving
+  more weight into it without a relaunch means hitting it at cruise speed.
 
 Goals relative to the robot, instead of clicking:
 
