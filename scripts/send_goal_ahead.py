@@ -22,10 +22,12 @@ import math
 import os
 import sys
 
+import rosgraph
 import rospy
 import tf.transformations as tft
 import tf2_ros
 from geometry_msgs.msg import PoseStamped
+from move_base_msgs.msg import MoveBaseActionGoal
 from std_msgs.msg import String
 
 
@@ -77,41 +79,72 @@ def main():
     if args.dry_run:
         return
 
-    # contact_probe_manager confirms every goal it accepts on this latched
-    # topic; the latched message already there is from an earlier goal.
+    # Confirmations: contact_probe_manager logs every goal it accepts on a
+    # latched topic (the message already there is from an earlier goal), and
+    # move_base turns the goal into an action goal on /move_base/goal.
     want = 'goal (%.2f, %.2f)' % (goal.pose.position.x, goal.pose.position.y)
-    accepted = []
+    cpm_ok, mb_ok = [], []
     rospy.Subscriber('/haptiquad_nav/mission_event', String,
-                     lambda m: accepted.append(m.data) if m.data.endswith(want) else None)
+                     lambda m: cpm_ok.append(1) if m.data.endswith(want) else None)
+
+    def _mb_cb(m):
+        p = m.goal.target_pose.pose.position
+        if math.hypot(p.x - goal.pose.position.x, p.y - goal.pose.position.y) < 0.01:
+            mb_ok.append(1)
+    rospy.Subscriber('/move_base/goal', MoveBaseActionGoal, _mb_cb)
 
     pub = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size=1)
-    # A message published before the subscribers connect is lost: wait for
-    # move_base and contact_probe_manager (both subscribe to this topic).
-    print('waiting for move_base and contact_probe_manager to connect ...')
+    # A message published before a subscriber has connected is lost for that
+    # subscriber. Waiting for "2 connections" was not enough: the bag recorder
+    # (and rviz) also subscribe, so the goal went out before move_base had
+    # connected and only contact_probe_manager got it (hardware run 7). Wait
+    # for every subscriber the master knows, then check that move_base
+    # actually received it, and send again if not.
+    master = rosgraph.Master(rospy.get_name())
+
+    def subscribers():
+        try:
+            for topic, nodes in master.getSystemState()[1]:
+                if topic == '/move_base_simple/goal':
+                    return [n for n in nodes if n != rospy.get_name()]
+        except Exception:
+            pass
+        return []
+
+    print('waiting for the subscribers of /move_base_simple/goal to connect ...')
     deadline = rospy.Time.now() + rospy.Duration(5.0)
-    while pub.get_num_connections() < 2 and rospy.Time.now() < deadline and not rospy.is_shutdown():
+    while not rospy.is_shutdown():
+        subs = subscribers()
+        if subs and pub.get_num_connections() >= len(subs):
+            break
+        if rospy.Time.now() > deadline:
+            print('WARNING: %d of %d subscribers connected after 5 s (%s); sending anyway'
+                  % (pub.get_num_connections(), len(subs), ', '.join(subs)))
+            break
         rospy.sleep(0.05)
-    n = pub.get_num_connections()
-    if n == 0:
-        print('ERROR: nobody subscribes to /move_base_simple/goal -- is the navigation core running?')
+    subs = subscribers()
+    if not any(n.endswith('move_base') for n in subs):
+        print('ERROR: move_base does not subscribe to /move_base_simple/goal -- is the navigation core running?')
         sys.exit(1)
-    if n < 2:
-        print('WARNING: only %d subscriber(s) connected (expected move_base and '
-              'contact_probe_manager); sending anyway' % n)
-    goal.header.stamp = rospy.Time.now()
-    pub.publish(goal)
-    print('sent to /move_base_simple/goal (%d subscribers)' % n)
+    rospy.sleep(0.2)   # margin for a connection that is still being set up
 
-    deadline = rospy.Time.now() + rospy.Duration(3.0)
-    while not accepted and rospy.Time.now() < deadline and not rospy.is_shutdown():
-        rospy.sleep(0.05)
-    if accepted:
-        print('contact_probe_manager accepted the goal: mission started')
-    else:
-        print('WARNING: contact_probe_manager did not confirm the goal within 3 s '
-              '(check its log: calibrating or HALTED?)')
+    for attempt in range(1, 4):
+        goal.header.stamp = rospy.Time.now()
+        pub.publish(goal)
+        print('sent to /move_base_simple/goal (attempt %d, %d of %d subscribers connected)'
+              % (attempt, pub.get_num_connections(), len(subs)))
+        deadline = rospy.Time.now() + rospy.Duration(1.5)
+        while not (mb_ok and cpm_ok) and rospy.Time.now() < deadline and not rospy.is_shutdown():
+            rospy.sleep(0.05)
+        if mb_ok:
+            break
+        print('move_base did not receive it, sending again')
+    print('move_base:             %s' % ('goal received' if mb_ok else 'NOT received'))
+    print('contact_probe_manager: %s' % ('mission started' if cpm_ok else
+                                         'NOT confirmed (calibrating or HALTED? check its log)'))
+    if not (mb_ok and cpm_ok):
         sys.exit(2)
-
+    print('OK: the robot is on its way')
 
 if __name__ == '__main__':
     main()

@@ -126,10 +126,16 @@ rosrun haptiquad_nav send_goal_ahead.py 3 -1       # 3 m ahead, 1 m to the right
 rosrun haptiquad_nav send_goal_ahead.py 2 --dry-run
 ```
 
-It prints each step (master, `odom -> base` transform, subscribers) and
-waits for `contact_probe_manager` to confirm the goal on `mission_event`:
-exit 0 means the mission started, 1 means it could not send (the message
-says why), 2 means it was sent but not accepted (calibrating or HALTED).
+It prints each step (master, `odom -> base` transform, subscribers). It
+waits until every subscriber of `/move_base_simple/goal` the master knows
+(move_base, contact_probe_manager, the bag recorder, rviz) has connected,
+then checks that move_base turned it into an action goal and that
+`contact_probe_manager` confirmed it on `mission_event`, and sends again
+(up to 3 times) if move_base did not get it. Up to `7755f16` it waited for
+any 2 connections, so with the recorder running the goal could reach only
+`contact_probe_manager` (mission started, robot idle: hardware run 7).
+Exit 0 means "OK: the robot is on its way", 1 that it could not send, 2 that
+move_base or contact_probe_manager did not confirm.
 Run it where the workspace is sourced and `/tf` is reachable.
 
 rviz goals reach `/move_base_simple/goal` through `goal_relay.py`. The
